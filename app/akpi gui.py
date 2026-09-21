@@ -705,7 +705,6 @@ class App(tk.Tk):
         add_btn("Make Stringouts", self.open_stringout)
         add_btn("Download Stringouts", self.download_stringouts)
         add_btn("Archive Clips", self.open_archive)
-        add_btn("DVR Storage Check", self.storage_check)
 
         ttk.Separator(sidebar).pack(fill="x", pady=10)
         ttk.Button(sidebar, text="Quit", command=self.destroy).pack(fill="x")
@@ -814,14 +813,6 @@ class App(tk.Tk):
 
     def open_archive(self):
         ArchiveDialog(self)
-
-    def storage_check(self):
-        targets = self.get_selected_dvrs()
-        if not targets:
-            messagebox.showwarning("No DVRs selected",
-                "Select at least one DVR in the status table (or click 'Select All DVRs') first.")
-            return
-        run_job(self, "DVR Storage Check", action_storage_check, targets)
 
 
 if __name__ == "__main__":
