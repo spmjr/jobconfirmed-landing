@@ -1350,30 +1350,40 @@ def formatDvrs(dvr: object, slot: str = "both") -> object:
     with spaghetti_semaphore:
 
         # Format drive(s) on dvr.
-        # slot: "S1", "S2", or "both" (default — matches original behavior).
+        # slot: "S1", "S2", "current" (whatever this DVR's active slot is
+        # right now, per dvr.actMediaSlot), or "both" (default — matches
+        # original behavior).
         # NOTE: targeting a single slot via eParamID_ChangeSlot before the
         # format command has NOT been confirmed against real hardware. If
         # the DVR still wipes both bays regardless of ChangeSlot, single-slot
         # targeting isn't actually possible on this firmware/API and this
         # should be verified with a real DVR (format one slot, confirm the
         # other slot's media survives) before this is trusted in the field.
-        if slot in ("S1", "S2"):
-            slot_value = "0" if slot == "S1" else "1"  # verify against AJA docs/hardware
+        resolved_slot = slot
+        if slot == "current":
+            # actMediaSlot is populated from eParamID_SelectedSlot on
+            # __init__/reset() and is already "S1"/"S2" elsewhere in this
+            # file (see the stringout devPath logic), so no translation needed.
+            resolved_slot = dvr.actMediaSlot
+            logging.info(f"{dvr.dvrName}: 'current slot' resolved to {resolved_slot}")
+
+        if resolved_slot in ("S1", "S2"):
+            slot_value = "0" if resolved_slot == "S1" else "1"  # verify against AJA docs/hardware
             slotReqParams = {'action': 'set', 'paramid': 'eParamID_ChangeSlot', 'value': slot_value}
             try:
                 requests.get("http://" + dvr.ip + "/config", slotReqParams, timeout=5)
             except requests.exceptions.RequestException as e:
                 logging.error(f"{e}")
-                print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] failed to select slot " + slot + " before formatting: " + str(e) + Col.end, flush=True)
+                print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] failed to select slot " + resolved_slot + " before formatting: " + str(e) + Col.end, flush=True)
                 setattr(dvr, "format_failed", True)
-                setattr(dvr, "format_result", f"failed to select slot {slot}: {e}")
+                setattr(dvr, "format_result", f"failed to select slot {resolved_slot}: {e}")
                 return dvr
 
         reqParams = {'action': 'set', 'paramid':'eParamID_StorageCommand','value': '4'}
         setting = "config"
 
-        logging.info(f"Sending format command to {dvr.dvrName} (slot: {slot})")
-        print(Col.yellow + "[INFO] Sending format command to [" + str(dvr.dvrName) + "] (slot: " + slot + ")" + Col.end, flush=True)
+        logging.info(f"Sending format command to {dvr.dvrName} (slot: {resolved_slot})")
+        print(Col.yellow + "[INFO] Sending format command to [" + str(dvr.dvrName) + "] (slot: " + resolved_slot + ")" + Col.end, flush=True)
         url = "http://" + dvr.ip + "/" + setting
         try:
             resp = json.loads((requests.get(url, reqParams, timeout=5)).text)
@@ -1412,7 +1422,7 @@ def formatDvrs(dvr: object, slot: str = "both") -> object:
                 logging.info("Formatting completed successfully.")
                 print(Col.green + "[SUCCESS] [" + str(dvr.dvrName) + "] HFS file system detected  - - - - - > State: [" + str(dvr.fsState) + "]" + Col.end, flush=True)
                 setattr(dvr, "format_failed", False)
-                setattr(dvr, "format_result", "success")
+                setattr(dvr, "format_result", f"success (slot: {resolved_slot})")
                 return dvr
 
         logging.error(f"Format timed out on {dvr.dvrName} after {FORMAT_TIMEOUT_SECONDS}s")

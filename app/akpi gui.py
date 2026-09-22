@@ -451,9 +451,11 @@ class FormatConfirmDialog(tk.Toplevel):
         ttk.Label(self, text="Slot target:", font=("", 10, "bold")).pack(anchor="w", padx=14, pady=(4, 2))
         self.slot_var = tk.StringVar(value="Both (default)")
         slot_combo = ttk.Combobox(self, textvariable=self.slot_var, state="readonly",
-                                   values=["Both (default)", "S1 only", "S2 only"])
+                                   values=["Both (default)", "S1 only", "S2 only", "Current slot (per DVR)"])
         slot_combo.pack(fill="x", padx=14)
-        ttk.Label(self, text="Single-slot targeting has not been verified against real\n"
+        ttk.Label(self, text="'Current slot' formats whichever slot each DVR is currently\n"
+                              "set to — may differ per DVR in a mixed fleet.\n"
+                              "Single-slot targeting has not been verified against real\n"
                               "hardware — confirm on one DVR before relying on it.",
                   foreground="#8a6d00", font=("", 8)).pack(anchor="w", padx=14, pady=(2, 10))
 
@@ -465,7 +467,8 @@ class FormatConfirmDialog(tk.Toplevel):
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=6)
 
     def _confirm(self):
-        slot_map = {"Both (default)": "both", "S1 only": "S1", "S2 only": "S2"}
+        slot_map = {"Both (default)": "both", "S1 only": "S1", "S2 only": "S2",
+                    "Current slot (per DVR)": "current"}
         slot = slot_map[self.slot_var.get()]
 
         def done(dvrList):
