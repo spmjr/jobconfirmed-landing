@@ -1346,89 +1346,153 @@ def formatDvrsStager(dvr: object) -> object:
 # otherwise sit blocked forever on program_state.barrier.wait()).
 FORMAT_TIMEOUT_SECONDS = 180
 
+# How long (seconds) to wait for a slot swap (toggle) to actually register
+# before giving up on it.
+SLOT_SWAP_TIMEOUT_SECONDS = 30
+
+
+def _format_current_slot(dvr: object) -> tuple:
+    """Sends the format command for whatever slot is CURRENTLY active on
+    dvr, and polls (capped at FORMAT_TIMEOUT_SECONDS) until the filesystem
+    comes back. The AJA format command only ever affects the active slot —
+    there is no 'format all slots' primitive on the device — so formatting
+    both slots means calling this twice with a swap in between.
+    Returns (success: bool, message: str)."""
+
+    reqParams = {'action': 'set', 'paramid': 'eParamID_StorageCommand', 'value': '4'}
+    setting = "config"
+
+    logging.info(f"Sending format command to {dvr.dvrName} (active slot: {dvr.actMediaSlot})")
+    print(Col.yellow + "[INFO] Sending format command to [" + str(dvr.dvrName) + "] (active slot: " + str(dvr.actMediaSlot) + ")" + Col.end, flush=True)
+    url = "http://" + dvr.ip + "/" + setting
+    try:
+        resp = json.loads((requests.get(url, reqParams, timeout=5)).text)
+    except requests.exceptions.InvalidJSONError as err:
+        logging.error(f"{err}")
+        print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] " + Col.end + f"({err})")
+        return False, f"invalid response: {err}"
+    except requests.exceptions.Timeout as t:
+        logging.error(f"{t}")
+        print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] " + Col.end + f"format command timed out: {t}")
+        return False, f"timeout sending format command: {t}"
+    except requests.exceptions.RequestException as e:
+        logging.error(f"{e}")
+        print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] " + Col.end + f"({e})")
+        return False, f"request failed: {e}"
+
+    logging.info(f"Awaiting DVR HFS file system to be present again for {dvr.dvrName}")
+    print(Col.yellow + "[INFO] Awaiting [" + str(dvr.dvrName) + "] HFS file system to be present again . . ." + Col.end, flush=True)
+
+    # Capped poll: previously this was `while (True): ...`, which had no
+    # exit if a DVR's filesystem never came back — that hung this thread
+    # forever, and every other DVR's already-finished format sat blocked
+    # on the shared barrier waiting for a thread that would never arrive.
+    waited = 0
+    while waited < FORMAT_TIMEOUT_SECONDS:
+        sleep(3)
+        waited += 3
+        dvr.reset()
+        if (dvr.fsState.strip() != "N/A"):
+            logging.info("Formatting completed successfully.")
+            print(Col.green + "[SUCCESS] [" + str(dvr.dvrName) + "] HFS file system detected  - - - - - > State: [" + str(dvr.fsState) + "]" + Col.end, flush=True)
+            return True, f"success (slot: {dvr.actMediaSlot})"
+
+    logging.error(f"Format timed out on {dvr.dvrName} after {FORMAT_TIMEOUT_SECONDS}s")
+    print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] did not come back online within " + str(FORMAT_TIMEOUT_SECONDS) + "s — marking failed, continuing with other DVRs" + Col.end, flush=True)
+    return False, f"timed out after {FORMAT_TIMEOUT_SECONDS}s waiting for filesystem (slot: {dvr.actMediaSlot})"
+
+
+def _swap_active_slot(dvr: object) -> bool:
+    """Toggle dvr to its other storage slot and wait for the switch to
+    register, capped at SLOT_SWAP_TIMEOUT_SECONDS. Uses the same
+    eParamID_ChangeSlot='6' toggle command as the existing 'Swap Storage
+    Slots' feature (see dvr_swap/storage_path_after_swap) — the AJA API
+    only exposes a toggle, there is no direct 'select S1' vs 'select S2'
+    command. Returns True if the slot was confirmed to change."""
+
+    prev_slot = dvr.actMediaSlot
+    reqParams = {'action': 'set', 'paramid': 'eParamID_ChangeSlot', 'value': '6'}
+    changedParams = {'name': 'eParamID_ChangeSlot', 'value': '6'}
+
+    logging.info(f"Swapping active slot on {dvr.dvrName} away from {prev_slot}")
+    print(Col.yellow + "[INFO] [" + str(dvr.dvrName) + "] swapping slot (currently " + str(prev_slot) + ") . . ." + Col.end, flush=True)
+    try:
+        setReq(dvr.ip, "config", reqParams, changedParams)
+    except requests.exceptions.RequestException as e:
+        logging.error(f"{e}")
+        print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] slot swap request failed: " + str(e) + Col.end, flush=True)
+        return False
+
+    waited = 0
+    while waited < SLOT_SWAP_TIMEOUT_SECONDS:
+        sleep(2)
+        waited += 2
+        dvr.reset()
+        if dvr.actMediaSlot in ("S1", "S2") and dvr.actMediaSlot != prev_slot:
+            logging.info(f"{dvr.dvrName} slot is now {dvr.actMediaSlot}")
+            print(Col.green + "[SUCCESS] [" + str(dvr.dvrName) + "] slot is now " + str(dvr.actMediaSlot) + Col.end, flush=True)
+            return True
+
+    logging.error(f"{dvr.dvrName} slot swap did not register within {SLOT_SWAP_TIMEOUT_SECONDS}s")
+    print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] slot swap did not register within " + str(SLOT_SWAP_TIMEOUT_SECONDS) + "s" + Col.end, flush=True)
+    return False
+
+
 def formatDvrs(dvr: object, slot: str = "both") -> object:
     with spaghetti_semaphore:
 
-        # Format drive(s) on dvr.
         # slot: "S1", "S2", "current" (whatever this DVR's active slot is
-        # right now, per dvr.actMediaSlot), or "both" (default — matches
-        # original behavior).
-        # NOTE: targeting a single slot via eParamID_ChangeSlot before the
-        # format command has NOT been confirmed against real hardware. If
-        # the DVR still wipes both bays regardless of ChangeSlot, single-slot
-        # targeting isn't actually possible on this firmware/API and this
-        # should be verified with a real DVR (format one slot, confirm the
-        # other slot's media survives) before this is trusted in the field.
-        resolved_slot = slot
+        # right now), or "both" (default — matches original behavior).
+        #
+        # The device only formats whatever slot is currently active — there
+        # is no 'format all slots' or 'format slot N directly' command. So:
+        #   "current" -> format the active slot, no swap needed
+        #   "S1"/"S2" -> if that's already the active slot, just format it;
+        #                otherwise swap to it, format, then swap back to
+        #                whatever was active before (so this DVR's active
+        #                slot ends the operation where it started)
+        #   "both"    -> format the active slot, swap, format the other
+        #                slot, then swap back to the original active slot
+        original_slot = dvr.actMediaSlot
+        results = []  # list of (slot_name, success, message) for reporting
+
+        def format_now():
+            ok, msg = _format_current_slot(dvr)
+            results.append((dvr.actMediaSlot, ok, msg))
+            return ok
+
         if slot == "current":
-            # actMediaSlot is populated from eParamID_SelectedSlot on
-            # __init__/reset() and is already "S1"/"S2" elsewhere in this
-            # file (see the stringout devPath logic), so no translation needed.
-            resolved_slot = dvr.actMediaSlot
-            logging.info(f"{dvr.dvrName}: 'current slot' resolved to {resolved_slot}")
+            format_now()
 
-        if resolved_slot in ("S1", "S2"):
-            slot_value = "0" if resolved_slot == "S1" else "1"  # verify against AJA docs/hardware
-            slotReqParams = {'action': 'set', 'paramid': 'eParamID_ChangeSlot', 'value': slot_value}
-            try:
-                requests.get("http://" + dvr.ip + "/config", slotReqParams, timeout=5)
-            except requests.exceptions.RequestException as e:
-                logging.error(f"{e}")
-                print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] failed to select slot " + resolved_slot + " before formatting: " + str(e) + Col.end, flush=True)
-                setattr(dvr, "format_failed", True)
-                setattr(dvr, "format_result", f"failed to select slot {resolved_slot}: {e}")
-                return dvr
+        elif slot in ("S1", "S2"):
+            if original_slot == slot:
+                format_now()
+            else:
+                if _swap_active_slot(dvr):
+                    format_now()
+                    if not _swap_active_slot(dvr):  # swap back to original
+                        results.append((original_slot, False,
+                                        f"formatted {slot} but failed to swap back to {original_slot} — "
+                                        f"DVR is left on {dvr.actMediaSlot}, verify manually"))
+                else:
+                    results.append((slot, False, f"could not swap from {original_slot} to {slot} — format not sent"))
 
-        reqParams = {'action': 'set', 'paramid':'eParamID_StorageCommand','value': '4'}
-        setting = "config"
+        else:  # "both"
+            format_now()  # formats whatever was originally active
+            if _swap_active_slot(dvr):
+                format_now()  # formats the other slot
+                if not _swap_active_slot(dvr):  # swap back to original
+                    results.append((original_slot, False,
+                                    f"formatted both slots but failed to swap back to {original_slot} — "
+                                    f"DVR is left on {dvr.actMediaSlot}, verify manually"))
+            else:
+                results.append(("(second slot)", False, "could not swap to second slot — only one slot was formatted"))
 
-        logging.info(f"Sending format command to {dvr.dvrName} (slot: {resolved_slot})")
-        print(Col.yellow + "[INFO] Sending format command to [" + str(dvr.dvrName) + "] (slot: " + resolved_slot + ")" + Col.end, flush=True)
-        url = "http://" + dvr.ip + "/" + setting
-        try:
-            resp = json.loads((requests.get(url, reqParams, timeout=5)).text)
-        except requests.exceptions.InvalidJSONError as err:
-            logging.error(f"{err}")
-            print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] " + Col.end + f"({err})")
-            setattr(dvr, "format_failed", True)
-            setattr(dvr, "format_result", f"invalid response: {err}")
-            return dvr
-        except requests.exceptions.Timeout as t:
-            logging.error(f"{t}")
-            print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] " + Col.end + f"format command timed out: {t}")
-            setattr(dvr, "format_failed", True)
-            setattr(dvr, "format_result", f"timeout sending format command: {t}")
-            return dvr
-        except requests.exceptions.RequestException as e:
-            logging.error(f"{e}")
-            print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] " + Col.end + f"({e})")
-            setattr(dvr, "format_failed", True)
-            setattr(dvr, "format_result", f"request failed: {e}")
-            return dvr
+        overall_ok = all(r[1] for r in results)
+        summary = "; ".join(f"{name}: {'ok' if ok else 'FAILED'} ({msg})" for name, ok, msg in results)
 
-        logging.info(f"Awaiting DVR HFS file system to be present again for {dvr.dvrName}")
-        print(Col.yellow + "[INFO] Awaiting [" + str(dvr.dvrName) + "] HFS file system to be present again . . ." + Col.end, flush=True)
-
-        # Capped poll: previously this was `while (True): ...`, which had no
-        # exit if a DVR's filesystem never came back — that hung this thread
-        # forever, and every other DVR's already-finished format sat blocked
-        # on the shared barrier waiting for a thread that would never arrive.
-        waited = 0
-        while waited < FORMAT_TIMEOUT_SECONDS:
-            sleep(3)
-            waited += 3
-            dvr.reset()
-            if (dvr.fsState.strip() != "N/A"):
-                logging.info("Formatting completed successfully.")
-                print(Col.green + "[SUCCESS] [" + str(dvr.dvrName) + "] HFS file system detected  - - - - - > State: [" + str(dvr.fsState) + "]" + Col.end, flush=True)
-                setattr(dvr, "format_failed", False)
-                setattr(dvr, "format_result", f"success (slot: {resolved_slot})")
-                return dvr
-
-        logging.error(f"Format timed out on {dvr.dvrName} after {FORMAT_TIMEOUT_SECONDS}s")
-        print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] did not come back online within " + str(FORMAT_TIMEOUT_SECONDS) + "s — marking failed, continuing with other DVRs" + Col.end, flush=True)
-        setattr(dvr, "format_failed", True)
-        setattr(dvr, "format_result", f"timed out after {FORMAT_TIMEOUT_SECONDS}s waiting for filesystem")
+        setattr(dvr, "format_failed", not overall_ok)
+        setattr(dvr, "format_result", summary)
     return dvr
  
 def stringout(dvrList):

@@ -454,9 +454,9 @@ class FormatConfirmDialog(tk.Toplevel):
                                    values=["Both (default)", "S1 only", "S2 only", "Current slot (per DVR)"])
         slot_combo.pack(fill="x", padx=14)
         ttk.Label(self, text="'Current slot' formats whichever slot each DVR is currently\n"
-                              "set to — may differ per DVR in a mixed fleet.\n"
-                              "Single-slot targeting has not been verified against real\n"
-                              "hardware — confirm on one DVR before relying on it.",
+                              "set to. 'Both' formats the active slot, swaps, formats the\n"
+                              "other slot, then swaps back. S1/S2 only swap first if that\n"
+                              "slot isn't already active, then swap back afterward.",
                   foreground="#8a6d00", font=("", 8)).pack(anchor="w", padx=14, pady=(2, 10))
 
         ttk.Label(self, text="This cannot be undone.", foreground="#c62828",
@@ -494,8 +494,8 @@ class FormatResultsDialog(tk.Toplevel):
         tree = ttk.Treeview(self, columns=cols, show="headings")
         tree.heading("dvrName", text="DVR")
         tree.heading("result", text="Result")
-        tree.column("dvrName", width=150, anchor="w")
-        tree.column("result", width=340, anchor="w")
+        tree.column("dvrName", width=140, anchor="w")
+        tree.column("result", width=420, anchor="w")
         tree.pack(fill="both", expand=True, padx=10, pady=10)
 
         tree.tag_configure("ok", foreground="#2e7d32")
