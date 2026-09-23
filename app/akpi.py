@@ -1351,6 +1351,45 @@ FORMAT_TIMEOUT_SECONDS = 180
 SLOT_SWAP_TIMEOUT_SECONDS = 30
 
 
+# How long (seconds) to wait, after a format completes, for the device to
+# finish settling (media loading/indexing the freshly-formatted filesystem)
+# before we attempt a slot swap. fsState reporting a real filesystem does
+# not necessarily mean the device is ready to act on a slot-change command
+# yet — in testing, a swap sent immediately after format consistently
+# failed to register (request succeeded, but the reported slot never
+# changed), which points at the device silently ignoring the toggle while
+# still busy rather than rejecting it outright.
+MEDIA_SETTLE_TIMEOUT_SECONDS = 60
+
+
+def _wait_for_media_settle(dvr: object) -> None:
+    """After a format, poll eParamID_MediaLoading (dvr.mediaLoading) until
+    two consecutive reads come back identical (i.e. it's stopped changing),
+    capped at MEDIA_SETTLE_TIMEOUT_SECONDS. We don't hardcode an expected
+    'done loading' string here since the exact value AJA uses hasn't been
+    confirmed — waiting for it to stabilize is a safer general-purpose
+    signal than guessing a literal value to match against."""
+
+    logging.info(f"{dvr.dvrName}: waiting for media to settle before next slot operation (currently: {dvr.mediaLoading})")
+    print(Col.yellow + "[INFO] [" + str(dvr.dvrName) + "] letting media settle before swapping . . ." + Col.end, flush=True)
+
+    waited = 0
+    prev = dvr.mediaLoading
+    while waited < MEDIA_SETTLE_TIMEOUT_SECONDS:
+        sleep(3)
+        waited += 3
+        dvr.reset()
+        if dvr.mediaLoading == prev:
+            logging.info(f"{dvr.dvrName}: media settled at '{dvr.mediaLoading}' after {waited}s")
+            return
+        prev = dvr.mediaLoading
+
+    logging.warning(f"{dvr.dvrName}: media loading state still changing after {MEDIA_SETTLE_TIMEOUT_SECONDS}s "
+                     f"(currently: {dvr.mediaLoading}) — proceeding anyway")
+    print(Col.yellow + "[WARNING] [" + str(dvr.dvrName) + "] media still appears to be settling after " +
+          str(MEDIA_SETTLE_TIMEOUT_SECONDS) + "s — proceeding with swap anyway" + Col.end, flush=True)
+
+
 def _format_current_slot(dvr: object) -> tuple:
     """Sends the format command for whatever slot is CURRENTLY active on
     dvr, and polls (capped at FORMAT_TIMEOUT_SECONDS) until the filesystem
@@ -1395,6 +1434,11 @@ def _format_current_slot(dvr: object) -> tuple:
         if (dvr.fsState.strip() != "N/A"):
             logging.info("Formatting completed successfully.")
             print(Col.green + "[SUCCESS] [" + str(dvr.dvrName) + "] HFS file system detected  - - - - - > State: [" + str(dvr.fsState) + "]" + Col.end, flush=True)
+            # fsState coming back does not mean the device is done indexing
+            # the freshly-formatted filesystem — give it time to settle
+            # before returning control to any code that might immediately
+            # try to swap slots (see MEDIA_SETTLE_TIMEOUT_SECONDS above).
+            _wait_for_media_settle(dvr)
             return True, f"success (slot: {dvr.actMediaSlot})"
 
     logging.error(f"Format timed out on {dvr.dvrName} after {FORMAT_TIMEOUT_SECONDS}s")
