@@ -1347,8 +1347,14 @@ def formatDvrsStager(dvr: object) -> object:
 FORMAT_TIMEOUT_SECONDS = 180
 
 # How long (seconds) to wait for a slot swap (toggle) to actually register
-# before giving up on it.
-SLOT_SWAP_TIMEOUT_SECONDS = 30
+# before giving up on it. Was 30s originally — real-world testing showed a
+# swap requested right after a format can leave the device's own
+# eParamID_ChangeSlot flag stuck "in progress" (not reset back to 0) and
+# fsState offline for well over 30s before (presumably) completing, so this
+# is bumped up to give it real room. Still a guess at the right number —
+# watch the [DEBUG] timeline on the next run to see how long it actually
+# takes to resolve, and tighten this back down once that's known.
+SLOT_SWAP_TIMEOUT_SECONDS = 120
 
 
 # How long (seconds) to wait, after a format completes, for the device to
