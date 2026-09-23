@@ -1379,6 +1379,11 @@ def _wait_for_media_settle(dvr: object) -> None:
         sleep(3)
         waited += 3
         dvr.reset()
+        print(Col.yellow + "[DEBUG] [" + str(dvr.dvrName) + f"] settle t+{waited}s  "
+              f"mediaLoading={dvr.mediaLoading}  state={dvr.state}  "
+              f"actMediaSlot={dvr.actMediaSlot}  fsState={dvr.fsState}" + Col.end, flush=True)
+        logging.info(f"{dvr.dvrName} settle t+{waited}s mediaLoading={dvr.mediaLoading} "
+                     f"state={dvr.state} actMediaSlot={dvr.actMediaSlot} fsState={dvr.fsState}")
         if dvr.mediaLoading == prev:
             logging.info(f"{dvr.dvrName}: media settled at '{dvr.mediaLoading}' after {waited}s")
             return
@@ -1509,6 +1514,16 @@ def _swap_to_slot(dvr: object, target_slot: str) -> bool:
             sleep(2)
             waited += 2
             dvr.reset()
+            # DIAGNOSTIC: print every tracked field each poll so a stuck
+            # swap shows exactly what is/isn't moving. Once we know which
+            # field actually reflects "busy," this can be trimmed back down.
+            print(Col.yellow + "[DEBUG] [" + str(dvr.dvrName) + f"] t+{waited}s  "
+                  f"actMediaSlot={dvr.actMediaSlot}  mediaLoading={dvr.mediaLoading}  "
+                  f"state={dvr.state}  changeSlot={dvr.changeSlot}  "
+                  f"fsState={dvr.fsState}  storagePath={dvr.storagePath}" + Col.end, flush=True)
+            logging.info(f"{dvr.dvrName} t+{waited}s actMediaSlot={dvr.actMediaSlot} "
+                         f"mediaLoading={dvr.mediaLoading} state={dvr.state} "
+                         f"changeSlot={dvr.changeSlot} fsState={dvr.fsState} storagePath={dvr.storagePath}")
             if dvr.actMediaSlot != prev:
                 changed = True
                 break
