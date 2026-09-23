@@ -1402,39 +1402,100 @@ def _format_current_slot(dvr: object) -> tuple:
     return False, f"timed out after {FORMAT_TIMEOUT_SECONDS}s waiting for filesystem (slot: {dvr.actMediaSlot})"
 
 
-def _swap_active_slot(dvr: object) -> bool:
-    """Toggle dvr to its other storage slot and wait for the switch to
-    register, capped at SLOT_SWAP_TIMEOUT_SECONDS. Uses the same
-    eParamID_ChangeSlot='6' toggle command as the existing 'Swap Storage
-    Slots' feature (see dvr_swap/storage_path_after_swap) — the AJA API
-    only exposes a toggle, there is no direct 'select S1' vs 'select S2'
-    command. Returns True if the slot was confirmed to change."""
-
-    prev_slot = dvr.actMediaSlot
+def _send_slot_toggle(dvr: object) -> bool:
+    """Sends a single eParamID_ChangeSlot='6' toggle command. Returns True
+    if the request itself succeeded (says nothing about where the slot
+    ended up — that's checked separately, since the device appears to
+    cycle through an intermediate 'No Media' relay position even when both
+    bays have media inserted, so one toggle does not reliably mean 'now on
+    the other real slot')."""
     reqParams = {'action': 'set', 'paramid': 'eParamID_ChangeSlot', 'value': '6'}
     changedParams = {'name': 'eParamID_ChangeSlot', 'value': '6'}
-
-    logging.info(f"Swapping active slot on {dvr.dvrName} away from {prev_slot}")
-    print(Col.yellow + "[INFO] [" + str(dvr.dvrName) + "] swapping slot (currently " + str(prev_slot) + ") . . ." + Col.end, flush=True)
     try:
         setReq(dvr.ip, "config", reqParams, changedParams)
+        return True
     except requests.exceptions.RequestException as e:
         logging.error(f"{e}")
-        print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] slot swap request failed: " + str(e) + Col.end, flush=True)
+        print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] slot toggle request failed: " + str(e) + Col.end, flush=True)
         return False
 
-    waited = 0
-    while waited < SLOT_SWAP_TIMEOUT_SECONDS:
-        sleep(2)
-        waited += 2
-        dvr.reset()
-        if dvr.actMediaSlot in ("S1", "S2") and dvr.actMediaSlot != prev_slot:
-            logging.info(f"{dvr.dvrName} slot is now {dvr.actMediaSlot}")
-            print(Col.green + "[SUCCESS] [" + str(dvr.dvrName) + "] slot is now " + str(dvr.actMediaSlot) + Col.end, flush=True)
+
+def _swap_to_slot(dvr: object, target_slot: str) -> bool:
+    """Toggles dvr's active slot until it reaches target_slot ('S1' or
+    'S2'). Confirmed device behavior: the toggle command cycles in a fixed
+    order — S1 -> S2 -> No Media -> S1 -> ... — even when both bays are
+    physically loaded (i.e. 'No Media' here is a relay position in the
+    cycle, not necessarily an empty bay). Given that fixed order, this
+    checks dvr.actMediaSlot, computes exactly how many toggles are needed
+    to reach target_slot from wherever it currently sits (1 or 2 — never
+    more, since the cycle length is 3), and sends exactly that many —
+    verifying position after each one rather than assuming the device
+    behaved as expected. If the device ever lands somewhere other than
+    what the known cycle predicts, that's logged as a warning and a few
+    extra toggles are attempted as a fallback rather than failing outright.
+    Returns True once dvr.actMediaSlot == target_slot, or False if it
+    couldn't get there."""
+
+    CYCLE = ["S1", "S2", "No Media"]
+
+    current = dvr.actMediaSlot
+    if current == target_slot:
+        return True
+
+    if current not in CYCLE:
+        logging.warning(f"{dvr.dvrName}: unrecognized slot state '{current}', falling back to trial toggling")
+        steps_needed = len(CYCLE) - 1  # unknown position — don't assume, just cap generously below
+    else:
+        steps_needed = (CYCLE.index(target_slot) - CYCLE.index(current)) % len(CYCLE)
+
+    logging.info(f"{dvr.dvrName}: at {current}, target {target_slot} — {steps_needed} toggle(s) expected")
+    print(Col.yellow + "[INFO] [" + str(dvr.dvrName) + "] at " + str(current) + ", target " + target_slot +
+          " — " + str(steps_needed) + " toggle(s) expected" + Col.end, flush=True)
+
+    max_toggles = len(CYCLE)  # safety cap in case actual behavior deviates from the known cycle
+    for attempt in range(1, max_toggles + 1):
+        prev = dvr.actMediaSlot
+
+        if not _send_slot_toggle(dvr):
+            return False
+
+        waited = 0
+        changed = False
+        while waited < SLOT_SWAP_TIMEOUT_SECONDS:
+            sleep(2)
+            waited += 2
+            dvr.reset()
+            if dvr.actMediaSlot != prev:
+                changed = True
+                break
+
+        if not changed:
+            logging.error(f"{dvr.dvrName}: slot toggle did not register within {SLOT_SWAP_TIMEOUT_SECONDS}s")
+            print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] slot toggle did not register within " +
+                  str(SLOT_SWAP_TIMEOUT_SECONDS) + "s" + Col.end, flush=True)
+            return False
+
+        if dvr.actMediaSlot == target_slot:
+            if attempt != steps_needed:
+                logging.warning(f"{dvr.dvrName}: reached {target_slot} after {attempt} toggle(s), "
+                                 f"expected {steps_needed} — cycle order may not be exactly as assumed")
+            else:
+                logging.info(f"{dvr.dvrName} reached target slot {target_slot} after {attempt} toggle(s), as expected")
+            print(Col.green + "[SUCCESS] [" + str(dvr.dvrName) + "] slot is now " + str(dvr.actMediaSlot) +
+                  Col.end, flush=True)
             return True
 
-    logging.error(f"{dvr.dvrName} slot swap did not register within {SLOT_SWAP_TIMEOUT_SECONDS}s")
-    print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] slot swap did not register within " + str(SLOT_SWAP_TIMEOUT_SECONDS) + "s" + Col.end, flush=True)
+        # Didn't land on target yet — if we've already used the expected
+        # number of toggles and still aren't there, the device is behaving
+        # differently than the known cycle predicts; log it clearly but
+        # keep trying up to max_toggles rather than giving up immediately.
+        if attempt >= steps_needed:
+            logging.warning(f"{dvr.dvrName}: toggle {attempt} landed on {dvr.actMediaSlot}, "
+                             f"not {target_slot} as the known cycle predicted — continuing to retry")
+
+    logging.error(f"{dvr.dvrName}: could not reach {target_slot} after {max_toggles} toggles (stuck on {dvr.actMediaSlot})")
+    print(Col.red + "[ERROR] [" + str(dvr.dvrName) + "] could not reach " + target_slot + " after " +
+          str(max_toggles) + " toggles — currently on " + str(dvr.actMediaSlot) + Col.end, flush=True)
     return False
 
 
@@ -1445,14 +1506,12 @@ def formatDvrs(dvr: object, slot: str = "both") -> object:
         # right now), or "both" (default — matches original behavior).
         #
         # The device only formats whatever slot is currently active — there
-        # is no 'format all slots' or 'format slot N directly' command. So:
-        #   "current" -> format the active slot, no swap needed
-        #   "S1"/"S2" -> if that's already the active slot, just format it;
-        #                otherwise swap to it, format, then swap back to
-        #                whatever was active before (so this DVR's active
-        #                slot ends the operation where it started)
-        #   "both"    -> format the active slot, swap, format the other
-        #                slot, then swap back to the original active slot
+        # is no 'format all slots' or 'format slot N directly' command, and
+        # switching slots is a toggle that can pass through an intermediate
+        # 'No Media' relay state (see _swap_to_slot) rather than a clean
+        # direct switch — so every slot change below goes through
+        # _swap_to_slot with an explicit target rather than a single blind
+        # toggle.
         original_slot = dvr.actMediaSlot
         results = []  # list of (slot_name, success, message) for reporting
 
@@ -1461,38 +1520,45 @@ def formatDvrs(dvr: object, slot: str = "both") -> object:
             results.append((dvr.actMediaSlot, ok, msg))
             return ok
 
+        def restore_original():
+            if original_slot in ("S1", "S2") and dvr.actMediaSlot != original_slot:
+                if not _swap_to_slot(dvr, original_slot):
+                    results.append((original_slot, False,
+                                    f"failed to swap back to original slot {original_slot} — "
+                                    f"DVR is left on {dvr.actMediaSlot}, verify manually"))
+
         if slot == "current":
-            format_now()
+            if original_slot not in ("S1", "S2"):
+                results.append(("(active slot)", False,
+                                 f"no media in currently active slot ({original_slot}) — nothing to format"))
+            else:
+                format_now()
 
         elif slot in ("S1", "S2"):
-            if original_slot == slot:
+            if _swap_to_slot(dvr, slot):
                 format_now()
+                restore_original()
             else:
-                if _swap_active_slot(dvr):
-                    format_now()
-                    if not _swap_active_slot(dvr):  # swap back to original
-                        results.append((original_slot, False,
-                                        f"formatted {slot} but failed to swap back to {original_slot} — "
-                                        f"DVR is left on {dvr.actMediaSlot}, verify manually"))
-                else:
-                    results.append((slot, False, f"could not swap from {original_slot} to {slot} — format not sent"))
+                results.append((slot, False, f"could not reach slot {slot} (currently {dvr.actMediaSlot}) — format not sent"))
 
         else:  # "both"
-            format_now()  # formats whatever was originally active
-            if _swap_active_slot(dvr):
-                format_now()  # formats the other slot
-                if not _swap_active_slot(dvr):  # swap back to original
-                    results.append((original_slot, False,
-                                    f"formatted both slots but failed to swap back to {original_slot} — "
-                                    f"DVR is left on {dvr.actMediaSlot}, verify manually"))
+            if _swap_to_slot(dvr, "S1"):
+                format_now()
             else:
-                results.append(("(second slot)", False, "could not swap to second slot — only one slot was formatted"))
+                results.append(("S1", False, f"could not reach S1 (currently {dvr.actMediaSlot}) — skipping"))
 
-        overall_ok = all(r[1] for r in results)
+            if _swap_to_slot(dvr, "S2"):
+                format_now()
+            else:
+                results.append(("S2", False, f"could not reach S2 (currently {dvr.actMediaSlot}) — skipping"))
+
+            restore_original()
+
+        overall_ok = bool(results) and all(r[1] for r in results)
         summary = "; ".join(f"{name}: {'ok' if ok else 'FAILED'} ({msg})" for name, ok, msg in results)
 
         setattr(dvr, "format_failed", not overall_ok)
-        setattr(dvr, "format_result", summary)
+        setattr(dvr, "format_result", summary if summary else "no action taken")
     return dvr
  
 def stringout(dvrList):
