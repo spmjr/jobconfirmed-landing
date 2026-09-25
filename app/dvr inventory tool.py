@@ -10,9 +10,9 @@ Workflow:
   1. Load Recording Schedule (.xlsx)   -> auto-fills clip names for DVR-1..DVR-50
      by reading the "DVR-N" label column and the clip name in the very next
      column to its right (the standard column pair used on these sheets).
-  2. Review/edit the table              -> DVRA-*, and anything the parser
-     couldn't find come in blank/SPARE; techs fix those by hand
-     (double-click a CLIP NAME cell to edit).
+  2. Review/edit the table              -> anything the parser couldn't
+     find comes in blank/SPARE; techs fix those by hand
+     (double-click a CLIP NAME cell to edit, or delete a row entirely).
   3. Export CSV                         -> writes DVR_IP,CLIP_NAME in the
      same IP order as the reference table.
 
@@ -83,14 +83,6 @@ DEFAULT_DVR_MAP_TEXT = """192.168.190.21\tDVR-1
 192.168.190.64\tDVR-44
 192.168.190.65\tDVR-45
 192.168.190.66\tDVR-46
-192.168.190.67\tDVRA-1
-192.168.190.68\tDVRA-2
-192.168.190.69\tDVRA-3
-192.168.190.70\tDVRA-4
-192.168.190.71\tDVRA-5
-192.168.190.72\tDVRA-6
-192.168.190.73\tDVRA-7
-192.168.190.74\tDVRA-8
 192.168.190.75\tDVRHLS-1
 192.168.190.76\tDVRHLS-2
 192.168.190.77\tDVRHLS-3
@@ -102,9 +94,7 @@ DEFAULT_DVR_MAP_TEXT = """192.168.190.21\tDVR-1
 """
 
 # DVR-N and DVRHLS-N labels get auto-filled from the schedule sheet by
-# taking the cell immediately to their right in the same row. DVRA-N clip
-# assignments aren't reliably positioned on these sheets, so those rows
-# are left for the tech to fill in by hand.
+# taking the cell immediately to their right in the same row.
 AUTO_LABEL_RE = re.compile(r'^DVR(HLS)?-\d+$', re.IGNORECASE)
 
 
@@ -202,11 +192,13 @@ class DVRInventoryApp(tk.Tk):
         vsb.pack(side="left", fill="y")
 
         self.tree.bind("<Double-1>", self._on_double_click)
+        self.tree.bind("<Delete>", self._on_delete_key)
 
         bottom = ttk.Frame(self, padding=10)
         bottom.pack(fill="x")
         ttk.Button(bottom, text="2. Export CSV...", command=self.export_csv).pack(side="right")
-        ttk.Label(bottom, text="Blank cells export as SPARE.").pack(side="left")
+        ttk.Button(bottom, text="Delete Selected Row", command=self.delete_selected_row).pack(side="left")
+        ttk.Label(bottom, text="   Blank cells export as SPARE.").pack(side="left")
 
         self._edit_entry = None
 
@@ -254,6 +246,18 @@ class DVRInventoryApp(tk.Tk):
         entry.bind("<FocusOut>", commit)
         entry.bind("<Escape>", lambda e: entry.destroy())
 
+    def delete_selected_row(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("No row selected", "Click a row first, then delete it.")
+            return
+        ip, label, clip = self.tree.item(selected[0], "values")
+        if messagebox.askyesno("Delete row?", f"Remove {ip} ({label}) from the list?"):
+            self.tree.delete(selected[0])
+
+    def _on_delete_key(self, event):
+        self.delete_selected_row()
+
     # ------------------------------------------------------------ actions
     def load_dvr_map(self):
         path = filedialog.askopenfilename(
@@ -296,14 +300,13 @@ class DVRInventoryApp(tk.Tk):
         self.status_var.set(
             f"Loaded {path.split('/')[-1].split(chr(92))[-1]}  —  "
             f"auto-filled {matched} of {total} rows. "
-            f"DVRA-*/unmatched rows are SPARE — fill in by hand if needed."
+            f"Unmatched rows are SPARE — fill in by hand if needed."
         )
         messagebox.showinfo(
             "Schedule loaded",
             f"Auto-filled {matched} of {total} clip names from DVR-N and DVRHLS-N rows.\n\n"
-            "Rows for DVRA-*, and anything the sheet didn't have a clear "
-            "clip name for are marked SPARE — double-click a CLIP_NAME cell to fix "
-            "before exporting."
+            "Anything the sheet didn't have a clear clip name for is marked SPARE — "
+            "double-click a CLIP_NAME cell to fix, or delete the row, before exporting."
         )
 
     def export_csv(self):
