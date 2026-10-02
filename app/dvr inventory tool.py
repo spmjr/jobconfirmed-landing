@@ -17,9 +17,7 @@ Workflow:
      same IP order as the reference table.
 
 The IP <-> DVR-label reference table is embedded below (from DVR.txt) since
-that mapping is fixed. "Load DVR Map..." lets you swap in an updated
-reference file (two columns, IP<TAB>LABEL, no header) if the site config
-ever changes.
+that mapping is fixed.
 """
 
 import re
@@ -98,19 +96,64 @@ DEFAULT_DVR_MAP_TEXT = """192.168.190.21\tDVR-1
 AUTO_LABEL_RE = re.compile(r'^DVR(HLS)?-\d+$', re.IGNORECASE)
 
 
+IP_RE = re.compile(r'^\d{1,3}(\.\d{1,3}){3}$')
+
+
+LABEL_LOOKS_VALID_RE = re.compile(r'^DVR[A-Za-z]*-\d+$', re.IGNORECASE)
+
+
 def parse_dvr_map(text):
-    """Parse IP<TAB>LABEL lines into an ordered list of (ip, label)."""
+    """
+    Parse two-column IP/LABEL lines into an ordered list of (ip, label),
+    plus a warning string (or None) describing any lines that were
+    skipped rather than erroring out on them.
+
+    Column order doesn't matter - whichever column looks like an IPv4
+    address is treated as the IP, so "IP<TAB>LABEL" and "LABEL<TAB>IP"
+    files both work. A header row (line 1 has no IP in either column, or
+    isn't a valid two-column line at all) is skipped automatically.
+    Any other line whose non-IP column isn't a plausible device label
+    (letters followed by a number, e.g. DVR-1, DVRHLS-4) is skipped too,
+    so one bad/extra row doesn't block loading everything else.
+    """
     entries = []
-    for lineno, line in enumerate(text.splitlines(), 1):
-        line = line.strip()
-        if not line:
-            continue
+    skipped = []
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    for lineno, line in enumerate(lines, 1):
         parts = line.split('\t') if '\t' in line else line.split(',')
         if len(parts) != 2:
-            raise ValueError(f"Line {lineno}: expected \"IP<TAB>LABEL\", got: {line!r}")
-        ip, label = parts[0].strip(), parts[1].strip()
+            if lineno == 1:
+                continue  # malformed first line -> treat as header, skip
+            skipped.append((lineno, line))
+            continue
+        a, b = parts[0].strip(), parts[1].strip()
+        if IP_RE.match(a):
+            ip, label = a, b
+        elif IP_RE.match(b):
+            ip, label = b, a
+        else:
+            if lineno == 1:
+                continue  # header row (e.g. "DVR_IP,DVR_LABEL") -> skip
+            skipped.append((lineno, line))
+            continue
+        if not LABEL_LOOKS_VALID_RE.match(label):
+            skipped.append((lineno, line))
+            continue
         entries.append((ip, label))
-    return entries
+
+    if not entries:
+        raise ValueError(
+            "No valid IP/label rows found. Each line needs an IP address and a "
+            "device label (e.g. DVR-1), separated by a tab or comma."
+        )
+
+    warning = None
+    if skipped:
+        preview = "; ".join(f"line {n}: {l!r}" for n, l in skipped[:5])
+        more = f" (+{len(skipped) - 5} more)" if len(skipped) > 5 else ""
+        warning = (f"Loaded {len(entries)} rows. Skipped {len(skipped)} line(s) that "
+                   f"didn't look like an \"IP, DVR LABEL\" pair: {preview}{more}")
+    return entries, warning
 
 
 def parse_schedule_xlsx(path):
@@ -146,6 +189,39 @@ def parse_schedule_xlsx(path):
     return label_clip
 
 
+def parse_ip_clip_csv(path):
+    """
+    Read a two-column IP,CLIP_NAME file (e.g. a previously exported
+    inventory CSV) and return {ip: clip_name}. Column order doesn't
+    matter - whichever column looks like an IPv4 address is treated as
+    the IP. A header row (no IP in either column) is skipped.
+    """
+    ip_clip = {}
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        rows = [r for r in reader if any(c.strip() for c in r)]
+    for lineno, row in enumerate(rows, 1):
+        if len(row) < 2:
+            continue
+        a, b = row[0].strip(), row[1].strip()
+        if IP_RE.match(a):
+            ip, clip = a, b
+        elif IP_RE.match(b):
+            ip, clip = b, a
+        else:
+            if lineno == 1:
+                continue  # header row, skip
+            continue  # not a usable row, skip quietly
+        if clip:
+            ip_clip[ip] = clip
+    if not ip_clip:
+        raise ValueError(
+            "No valid IP/clip-name rows found. Each line needs an IP address "
+            "and a clip name, separated by a comma."
+        )
+    return ip_clip
+
+
 class DVRInventoryApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -153,7 +229,7 @@ class DVRInventoryApp(tk.Tk):
         self.geometry("760x640")
         self.minsize(620, 480)
 
-        self.dvr_map = parse_dvr_map(DEFAULT_DVR_MAP_TEXT)  # [(ip, label), ...]
+        self.dvr_map, _ = parse_dvr_map(DEFAULT_DVR_MAP_TEXT)  # [(ip, label), ...]
         self.schedule_path = None
 
         self._build_ui()
@@ -166,12 +242,10 @@ class DVRInventoryApp(tk.Tk):
 
         ttk.Button(top, text="1. Load Recording Schedule (.xlsx)...",
                    command=self.load_schedule).pack(side="left")
-        ttk.Button(top, text="Load DVR Map...",
-                   command=self.load_dvr_map).pack(side="left", padx=(8, 0))
-        ttk.Button(top, text="Reset DVR Map to Default",
-                   command=self.reset_dvr_map).pack(side="left", padx=(8, 0))
+        ttk.Button(top, text="Load IP/Clip CSV...",
+                   command=self.load_ip_clip_csv).pack(side="left", padx=(8, 0))
 
-        self.status_var = tk.StringVar(value="Using built-in DVR map (62 devices). No schedule loaded yet.")
+        self.status_var = tk.StringVar(value="No schedule loaded yet.")
         ttk.Label(self, textvariable=self.status_var, padding=(10, 0)).pack(fill="x")
 
         mid = ttk.Frame(self, padding=10)
@@ -208,6 +282,17 @@ class DVRInventoryApp(tk.Tk):
         matched = 0
         for ip, label in self.dvr_map:
             clip = clip_lookup.get(label.upper(), "")
+            if clip:
+                matched += 1
+            self.tree.insert("", "end", values=(ip, label, clip if clip else "SPARE"))
+        return matched
+
+    def _populate_table_by_ip(self, ip_clip):
+        """Like _populate_table, but looks clip names up by IP instead of DVR label."""
+        self.tree.delete(*self.tree.get_children())
+        matched = 0
+        for ip, label in self.dvr_map:
+            clip = ip_clip.get(ip, "")
             if clip:
                 matched += 1
             self.tree.insert("", "end", values=(ip, label, clip if clip else "SPARE"))
@@ -259,29 +344,6 @@ class DVRInventoryApp(tk.Tk):
         self.delete_selected_row()
 
     # ------------------------------------------------------------ actions
-    def load_dvr_map(self):
-        path = filedialog.askopenfilename(
-            title="Select DVR IP map (IP<TAB>LABEL per line)",
-            filetypes=[("Text/CSV", "*.txt *.csv"), ("All files", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            with open(path, "r", encoding="utf-8-sig") as f:
-                text = f.read()
-            new_map = parse_dvr_map(text)
-        except Exception as e:
-            messagebox.showerror("Could not load DVR map", str(e))
-            return
-        self.dvr_map = new_map
-        self.status_var.set(f"Loaded custom DVR map ({len(self.dvr_map)} devices) from {path}")
-        self._populate_table(clip_lookup={})
-
-    def reset_dvr_map(self):
-        self.dvr_map = parse_dvr_map(DEFAULT_DVR_MAP_TEXT)
-        self.status_var.set(f"Using built-in DVR map ({len(self.dvr_map)} devices).")
-        self._populate_table(clip_lookup={})
-
     def load_schedule(self):
         path = filedialog.askopenfilename(
             title="Select Recording Schedule",
@@ -306,6 +368,33 @@ class DVRInventoryApp(tk.Tk):
             "Schedule loaded",
             f"Auto-filled {matched} of {total} clip names from DVR-N and DVRHLS-N rows.\n\n"
             "Anything the sheet didn't have a clear clip name for is marked SPARE — "
+            "double-click a CLIP_NAME cell to fix, or delete the row, before exporting."
+        )
+
+    def load_ip_clip_csv(self):
+        path = filedialog.askopenfilename(
+            title="Select IP/Clip Name CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            ip_clip = parse_ip_clip_csv(path)
+        except Exception as e:
+            messagebox.showerror("Could not read CSV", str(e))
+            return
+        self.schedule_path = path
+        matched = self._populate_table_by_ip(ip_clip)
+        total = len(self.dvr_map)
+        self.status_var.set(
+            f"Loaded {path.split('/')[-1].split(chr(92))[-1]}  —  "
+            f"matched {matched} of {total} rows by IP. "
+            f"Unmatched rows are SPARE — fill in by hand if needed."
+        )
+        messagebox.showinfo(
+            "CSV loaded",
+            f"Matched {matched} of {total} clip names by IP address against the DVR map.\n\n"
+            "Anything that didn't match an IP in the DVR map is marked SPARE — "
             "double-click a CLIP_NAME cell to fix, or delete the row, before exporting."
         )
 
