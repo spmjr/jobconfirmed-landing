@@ -20,6 +20,7 @@ The IP <-> DVR-label reference table is embedded below (from DVR.txt) since
 that mapping is fixed.
 """
 
+import os
 import re
 import csv
 import sys
@@ -81,6 +82,14 @@ DEFAULT_DVR_MAP_TEXT = """192.168.190.21\tDVR-1
 192.168.190.64\tDVR-44
 192.168.190.65\tDVR-45
 192.168.190.66\tDVR-46
+192.168.190.67\tDVRA-1
+192.168.190.68\tDVRA-2
+192.168.190.69\tDVRA-3
+192.168.190.70\tDVRA-4
+192.168.190.71\tDVRA-5
+192.168.190.72\tDVRA-6
+192.168.190.73\tDVRA-7
+192.168.190.74\tDVRA-8
 192.168.190.75\tDVRHLS-1
 192.168.190.76\tDVRHLS-2
 192.168.190.77\tDVRHLS-3
@@ -93,7 +102,7 @@ DEFAULT_DVR_MAP_TEXT = """192.168.190.21\tDVR-1
 
 # DVR-N and DVRHLS-N labels get auto-filled from the schedule sheet by
 # taking the cell immediately to their right in the same row.
-AUTO_LABEL_RE = re.compile(r'^DVR(HLS)?-\d+$', re.IGNORECASE)
+AUTO_LABEL_RE = re.compile(r'^DVR(A|HLS)?-\d+$', re.IGNORECASE)
 
 
 IP_RE = re.compile(r'^\d{1,3}(\.\d{1,3}){3}$')
@@ -408,24 +417,51 @@ class DVRInventoryApp(tk.Tk):
             base = base.rsplit(".", 1)[0]
             default_name = f"{base}_inventory.csv"
         path = filedialog.asksaveasfilename(
-            title="Save inventory CSV",
+            title="Save inventory CSV (a separate _DVRA file is saved next to it)",
             defaultextension=".csv",
             initialfile=default_name,
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
         )
         if not path:
             return
-        try:
-            with open(path, "w", newline="", encoding="utf-8") as f:
+
+        # Split rows: DVRA-* go to their own file, everything else to the main file.
+        main_rows, dvra_rows = [], []
+        for row_id in self.tree.get_children():
+            ip, label, clip = self.tree.item(row_id, "values")
+            if str(label).upper().startswith("DVRA-"):
+                dvra_rows.append((ip, clip))
+            else:
+                main_rows.append((ip, clip))
+
+        base, ext = os.path.splitext(path)
+        if base.lower().endswith("_inventory"):
+            dvra_path = base[: -len("_inventory")] + "_DVRA_inventory" + (ext or ".csv")
+        else:
+            dvra_path = base + "_DVRA" + (ext or ".csv")
+
+        def write(p, rows):
+            with open(p, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(["DVR_IP", "CLIP_NAME"])
-                for row_id in self.tree.get_children():
-                    ip, label, clip = self.tree.item(row_id, "values")
+                for ip, clip in rows:
                     writer.writerow([ip, clip])
+
+        saved = []
+        try:
+            if main_rows:
+                write(path, main_rows)
+                saved.append(path)
+            if dvra_rows:
+                write(dvra_path, dvra_rows)
+                saved.append(dvra_path)
         except Exception as e:
             messagebox.showerror("Could not save file", str(e))
             return
-        messagebox.showinfo("Saved", f"Inventory saved to:\n{path}")
+        if not saved:
+            messagebox.showwarning("Nothing to export", "The table is empty.")
+            return
+        messagebox.showinfo("Saved", "Saved:\n" + "\n".join(saved))
 
 
 def main():
