@@ -370,6 +370,13 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+if (-not (Test-Path -LiteralPath $ConfigPath)) {
+    $pick = New-Object System.Windows.Forms.OpenFileDialog
+    $pick.Title = "HELOs.txt not found next to the script - pick it"
+    $pick.Filter = 'HELO list (*.txt)|*.txt|All files (*.*)|*.*'
+    if ($pick.ShowDialog() -eq 'OK') { $ConfigPath = $pick.FileName }
+    $pick.Dispose()
+}
 $cfg = Import-HeloConfig
 $script:devices = $cfg.Devices
 Import-Presets
@@ -464,6 +471,8 @@ $chkPath.Location = New-Object System.Drawing.Point(14, 114); $chkPath.Size = Ne
 $txtPath = New-Object System.Windows.Forms.TextBox
 $txtPath.Location = New-Object System.Drawing.Point(170, 112); $txtPath.Size = New-Object System.Drawing.Size(508, 22)
 
+$btnBrowsePath = New-Btn 'Browse share...' 686 109 120
+
 $btnCheck = New-Btn 'Check units (read only)' 14 150 170
 $btnPush = New-Btn 'Push to checked units' 192 150 170
 $btnPush.Font = New-Object System.Drawing.Font($btnPush.Font, [System.Drawing.FontStyle]::Bold)
@@ -471,7 +480,7 @@ $btnStop = New-Btn 'Stop' 370 150 80
 $btnStop.Enabled = $false
 $lblHint = New-Label 'Skips units that are recording/streaming or not on the first profile. Domain user/password are never changed.' 462 154 780
 
-$grp.Controls.AddRange(@($chkPrefix, $chkTemplate, $cmbTemplate, $chkServer, $cmbPreset, $txtServer, $btnSavePreset, $chkPath, $txtPath, $btnCheck, $btnPush, $btnStop, $lblHint))
+$grp.Controls.AddRange(@($chkPrefix, $chkTemplate, $cmbTemplate, $chkServer, $cmbPreset, $txtServer, $btnSavePreset, $chkPath, $txtPath, $btnBrowsePath, $btnCheck, $btnPush, $btnStop, $lblHint))
 
 # Steps whose REST parameter is not known yet stay switched off.
 foreach ($pair in @(@($chkTemplate, 'Template'), @($chkServer, 'SmbServer'), @($chkPath, 'SmbPath'))) {
@@ -498,13 +507,14 @@ $lblStatus.Text = 'Ready.'
 # Fill control first so the edge panels dock before it.
 $form.Controls.AddRange(@($lv, $grp, $lblStatus, $pnlTop))
 
-function Show-InputBox($title, $prompt) {
+function Show-InputBox($title, $prompt, $default = '') {
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text = $title; $dlg.ClientSize = New-Object System.Drawing.Size(340, 104)
     $dlg.FormBorderStyle = 'FixedDialog'; $dlg.StartPosition = 'CenterParent'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
     $l = New-Label $prompt 12 10 316
     $tb = New-Object System.Windows.Forms.TextBox
     $tb.Location = New-Object System.Drawing.Point(12, 34); $tb.Size = New-Object System.Drawing.Size(316, 22)
+    $tb.Text = $default
     $okBtn = New-Btn 'OK' 172 66 75; $okBtn.DialogResult = 'OK'
     $noBtn = New-Btn 'Cancel' 253 66 75; $noBtn.DialogResult = 'Cancel'
     $dlg.AcceptButton = $okBtn; $dlg.CancelButton = $noBtn
@@ -514,6 +524,89 @@ function Show-InputBox($title, $prompt) {
     $dlg.Dispose()
     return $answer
 }
+
+#region Share browser
+# Where the PC sees the recording share (the HELOs reach the same share by their own address).
+$script:browseRoot = '\\147.105.86.222\Vulcan'
+$script:shResult = $null
+
+function Add-ShareChildren($node) {
+    $node.Nodes.Clear()
+    try {
+        $dirs = @([System.IO.Directory]::GetDirectories([string]$node.Tag) | Sort-Object)
+        foreach ($d in $dirs) {
+            $n = New-Object System.Windows.Forms.TreeNode([System.IO.Path]::GetFileName($d))
+            $n.Tag = $d
+            [void]$n.Nodes.Add('...')
+            [void]$node.Nodes.Add($n)
+        }
+    }
+    catch { [void]$node.Nodes.Add('(cannot read: ' + $_.Exception.Message + ')') }
+}
+
+function Set-ShareRoot {
+    $f = $script:shForm
+    $root = $script:shRootBox.Text.Trim().TrimEnd('\')
+    $script:shTree.Nodes.Clear()
+    if ($root -eq '') { return }
+    $n = New-Object System.Windows.Forms.TreeNode($root)
+    $n.Tag = $root
+    [void]$script:shTree.Nodes.Add($n)
+    Add-ShareChildren $n
+    $n.Expand()
+    $script:browseRoot = $root
+}
+
+function Show-ShareBrowser {
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'Pick the record folder'; $dlg.ClientSize = New-Object System.Drawing.Size(520, 500)
+    $dlg.StartPosition = 'CenterParent'; $dlg.MinimizeBox = $false; $dlg.MaximizeBox = $false; $dlg.FormBorderStyle = 'FixedDialog'
+    $l = New-Label 'Share to browse (as this PC sees it):' 12 10 400
+    $rootBox = New-Object System.Windows.Forms.TextBox
+    $rootBox.Location = New-Object System.Drawing.Point(12, 32); $rootBox.Size = New-Object System.Drawing.Size(410, 22)
+    $rootBox.Text = $script:browseRoot
+    $goBtn = New-Btn 'Go' 430 29 78
+    $tree = New-Object System.Windows.Forms.TreeView
+    $tree.Location = New-Object System.Drawing.Point(12, 64); $tree.Size = New-Object System.Drawing.Size(496, 360)
+    $sel = New-Label '' 12 430 496
+    $okBtn = New-Btn 'Use this folder' 292 462 130; $okBtn.DialogResult = 'OK'
+    $noBtn = New-Btn 'Cancel' 430 462 78; $noBtn.DialogResult = 'Cancel'
+    $dlg.AcceptButton = $okBtn; $dlg.CancelButton = $noBtn
+    $dlg.Controls.AddRange(@($l, $rootBox, $goBtn, $tree, $sel, $okBtn, $noBtn))
+
+    $script:shForm = $dlg; $script:shRootBox = $rootBox; $script:shTree = $tree; $script:shSel = $sel
+    $goBtn.Add_Click({ Set-ShareRoot })
+    $tree.Add_BeforeExpand({
+        param($sender, $e)
+        $n = $e.Node
+        if ($n.Nodes.Count -eq 1 -and $n.Nodes[0].Text -eq '...') { Add-ShareChildren $n }
+    })
+    $tree.Add_AfterSelect({
+        param($sender, $e)
+        $t = "$($e.Node.Tag)"
+        $root = $script:browseRoot
+        if ($t.Length -ge $root.Length -and $t.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $rel = $t.Substring($root.Length).Replace('\', '/')
+            if ($rel -eq '') { $rel = '/' }
+            $script:shSel.Text = "Record path:  $rel"
+        } else { $script:shSel.Text = '' }
+    })
+    Set-ShareRoot
+
+    $script:shResult = $null
+    if ($dlg.ShowDialog($form) -eq 'OK' -and $tree.SelectedNode -and $tree.SelectedNode.Tag) {
+        $t = "$($tree.SelectedNode.Tag)"
+        $root = $script:browseRoot
+        if ($t.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $rel = $t.Substring($root.Length).Replace('\', '/')
+            if ($rel -eq '') { $rel = '/' }
+            $script:shResult = $rel
+        }
+    }
+    $dlg.Dispose()
+    return $script:shResult
+}
+#endregion Share browser
 
 #region Rows
 function Set-RowResult($row, $status, $text) {
@@ -582,7 +675,7 @@ function Build-Rows {
         [void]$lv.Items.Add($item)
     }
     $lv.EndUpdate()
-    $lblStatus.Text = ("{0} HELOs listed. Ki Pro GOs are not handled here." -f $helos.Count)
+    $lblStatus.Text = ("{0} HELOs listed. Double-click a row to edit its prefix by hand." -f $helos.Count)
 }
 
 function Update-Mapping {
@@ -743,6 +836,22 @@ $btnSavePreset.Add_Click({
     $script:presets[$name] = $val
     try { Save-Presets } catch { [void][System.Windows.Forms.MessageBox]::Show($form, "Could not save presets: $($_.Exception.Message)", 'Presets') }
     Update-PresetList
+})
+$btnBrowsePath.Add_Click({
+    $r = Show-ShareBrowser
+    if ($r) { $txtPath.Text = $r; $chkPath.Checked = $true }
+})
+$lv.Add_DoubleClick({
+    if ($lv.SelectedItems.Count -eq 0) { return }
+    $row = $lv.SelectedItems[0].Tag
+    $new = Show-InputBox 'Filename prefix' ("Prefix for $(Get-DisplayName $row.Dev)  (blank = leave unchanged):") $row.Prefix
+    if ($null -eq $new) { return }
+    if ($new -match '[\\/:*?"<>|]') { [void][System.Windows.Forms.MessageBox]::Show($form, 'Those characters are not allowed in a file name: \ / : * ? " < > |', 'Prefix'); return }
+    $row.Prefix = $new
+    $row.Item.SubItems[3].Text = $new
+    if ($row.Flags -notmatch 'edited by hand') { $row.Flags = ($row.Flags + $(if ($row.Flags) { '; ' } else { '' }) + 'prefix edited by hand') }
+    $row.Item.SubItems[6].Text = $row.Flags
+    $row.Item.Checked = $true
 })
 $btnAll.Add_Click({ foreach ($it in $lv.Items) { $it.Checked = $true } })
 $btnNone.Add_Click({ foreach ($it in $lv.Items) { $it.Checked = $false } })
