@@ -40,6 +40,16 @@ while ($queue.Count -gt 0 -and $files.Count -lt 80) {
     }
 }
 
+# Save the page files so they can be searched properly (only the HELO's own files, nothing is sent anywhere)
+$saveDir = Join-Path $outDir 'helo-page-files'
+[void](New-Item -ItemType Directory -Force -Path $saveDir)
+foreach ($k in $files.Keys) {
+    if (-not $files[$k]) { continue }
+    $leaf = ($k -replace '[\\/:*?"<>|]', '_').Trim('_')
+    if ($leaf -eq '') { $leaf = 'index.html' }
+    [System.IO.File]::WriteAllText((Join-Path $saveDir $leaf), $files[$k], (New-Object System.Text.UTF8Encoding($false)))
+}
+
 $out = New-Object System.Collections.ArrayList
 [void]$out.Add("Unit $Ip - files read: $($files.Count)")
 foreach ($k in ($files.Keys | Sort-Object)) { [void]$out.Add(("  {0}  ({1} chars)" -f $k, $(if ($files[$k]) { $files[$k].Length } else { 'not readable' }))) }
@@ -69,5 +79,5 @@ foreach ($k in ($files.Keys | Sort-Object)) {
 $text = ($out -join "`r`n")
 Write-Host $text
 [System.IO.File]::WriteAllText((Join-Path $outDir 'helo-pagegrep.txt'), $text, (New-Object System.Text.UTF8Encoding($false)))
-Write-Host "`nSaved helo-pagegrep.txt in $outDir - send me that file."
+Write-Host "`nSaved helo-pagegrep.txt and the folder helo-page-files in $outDir - zip the helo-page-files folder and send it to me."
 [void](Read-Host 'Press Enter to close')
