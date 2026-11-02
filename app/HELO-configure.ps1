@@ -594,17 +594,28 @@ function Show-ShareBrowser {
     })
     Set-ShareRoot
 
-    $script:shPick = $null
     $answer = $dlg.ShowDialog($form)
-    $pick = $script:shPick
+    # read the selection straight from the tree (no dependence on the select event)
+    $node = $tree.SelectedNode
+    $tag = ''; $text = ''
+    if ($node) { $text = "$($node.Text)"; if ($node.Tag) { $tag = "$($node.Tag)" } }
+    $root = "$($script:browseRoot)".TrimEnd('\')
     $dlg.Dispose()
-    if ($answer -eq [System.Windows.Forms.DialogResult]::OK -and $pick) {
-        # fill the box right here instead of passing the value back
-        $txtPath.Text = [string]$pick
+    if ($answer -ne [System.Windows.Forms.DialogResult]::OK) { return }
+
+    $rel = $null
+    if ($tag -ne '' -and $tag.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $rel = $tag.Substring($root.Length).Replace('\', '/')
+        if ($rel -eq '') { $rel = '/' } elseif (-not $rel.StartsWith('/')) { $rel = '/' + $rel }
+    }
+    if ($rel) {
+        $txtPath.Text = $rel
         $chkPath.Checked = $true
     }
-    elseif ($answer -eq [System.Windows.Forms.DialogResult]::OK) {
-        [void][System.Windows.Forms.MessageBox]::Show($form, 'No folder was selected. Click a folder in the tree first (the "Record path:" line under the tree should show it), then "Use this folder".', 'Browse share')
+    else {
+        $nl = [Environment]::NewLine
+        $msg = "Could not work out the path." + $nl + "Selected: '$text'" + $nl + "Folder: '$tag'" + $nl + "Share root: '$root'" + $nl + $nl + "Click the folder name in the tree first (it should highlight), then 'Use this folder'."
+        [void][System.Windows.Forms.MessageBox]::Show($form, $msg, 'Browse share')
     }
 }
 #endregion Share browser
