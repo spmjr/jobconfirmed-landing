@@ -589,22 +589,23 @@ function Show-ShareBrowser {
             $rel = $t.Substring($root.Length).Replace('\', '/')
             if ($rel -eq '') { $rel = '/' }
             $script:shSel.Text = "Record path:  $rel"
-        } else { $script:shSel.Text = '' }
+            $script:shPick = $rel
+        } else { $script:shSel.Text = ''; $script:shPick = $null }
     })
     Set-ShareRoot
 
-    $script:shResult = $null
-    if ($dlg.ShowDialog($form) -eq 'OK' -and $tree.SelectedNode -and $tree.SelectedNode.Tag) {
-        $t = "$($tree.SelectedNode.Tag)"
-        $root = $script:browseRoot
-        if ($t.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $rel = $t.Substring($root.Length).Replace('\', '/')
-            if ($rel -eq '') { $rel = '/' }
-            $script:shResult = $rel
-        }
-    }
+    $script:shPick = $null
+    $answer = $dlg.ShowDialog($form)
+    $pick = $script:shPick
     $dlg.Dispose()
-    return $script:shResult
+    if ($answer -eq [System.Windows.Forms.DialogResult]::OK -and $pick) {
+        # fill the box right here instead of passing the value back
+        $txtPath.Text = [string]$pick
+        $chkPath.Checked = $true
+    }
+    elseif ($answer -eq [System.Windows.Forms.DialogResult]::OK) {
+        [void][System.Windows.Forms.MessageBox]::Show($form, 'No folder was selected. Click a folder in the tree first (the "Record path:" line under the tree should show it), then "Use this folder".', 'Browse share')
+    }
 }
 #endregion Share browser
 
@@ -839,8 +840,7 @@ $btnSavePreset.Add_Click({
     Update-PresetList
 })
 $btnBrowsePath.Add_Click({
-    $r = Show-ShareBrowser
-    if ($r) { $txtPath.Text = $r; $chkPath.Checked = $true }
+    [void](Show-ShareBrowser)
 })
 $lv.Add_DoubleClick({
     if ($lv.SelectedItems.Count -eq 0) { return }
