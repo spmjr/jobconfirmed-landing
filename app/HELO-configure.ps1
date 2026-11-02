@@ -40,7 +40,7 @@ $params = @{
     ProfileSel    = 'eParamID_RecordingProfileSel'
     Prefix        = 'eParamID_FilenamePrefix'
     SmbServer     = 'eParamID_RecordingShareNetworkSMB'
-    SmbPath       = 'eParamID_RecordingPathFriendly'
+    SmbPath       = 'eParamID_RecordingPathNetworkSMB_1'
     Template      = 'eParamID_RecordingTemplateSrc'
     TemplateApply = ''
 }
@@ -154,7 +154,7 @@ function Invoke-HeloGet($ip, $paramId) {
 # Values are URL-encoded (spaces, backslashes, slashes, non-ASCII...) as the AJA docs require.
 function Invoke-HeloSet($ip, $paramId, $value) {
     $enc = [System.Uri]::EscapeDataString("$value")
-    try   { $raw = $client.GetStringAsync("http://$ip/config?action=set&paramid=$paramId&value=$enc").GetAwaiter().GetResult(); return @{ Ok = $true; Raw = $raw; Error = $null } }
+    try   { $raw = $client.GetStringAsync("http://$ip/config?action=set&paramid=$paramId&value=$enc&configid=0").GetAwaiter().GetResult(); return @{ Ok = $true; Raw = $raw; Error = $null } }
     catch { return @{ Ok = $false; Raw = $null; Error = $_.Exception.GetBaseException().Message } }
 }
 
@@ -771,7 +771,8 @@ function Invoke-PushUnits {
     }
     if ($chkPath.Checked -and $chkPath.Enabled) {
         if ($txtPath.Text.Trim() -eq '') { [void][System.Windows.Forms.MessageBox]::Show($form, 'Enter the SMB record path.', 'Push'); return }
-        $plan.SmbPath = $txtPath.Text.Trim(); $lines += "SMB record path: $($plan.SmbPath)"
+        $pp = ($txtPath.Text.Trim() -replace '\\', '/'); if (-not $pp.StartsWith('/')) { $pp = '/' + $pp }
+        $plan.SmbPath = $pp; $lines += "SMB record path: $($plan.SmbPath)"
     }
     if ($lines.Count -eq 0) { [void][System.Windows.Forms.MessageBox]::Show($form, 'Nothing selected to push.', 'Push'); return }
 
