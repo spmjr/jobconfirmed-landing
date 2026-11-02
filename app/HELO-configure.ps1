@@ -530,92 +530,87 @@ function Show-InputBox($title, $prompt, $default = '') {
 $script:browseRoot = '\\147.105.86.222\Vulcan'
 $script:shResult = $null
 
-function Add-ShareChildren($node) {
-    $node.Nodes.Clear()
-    try {
-        $dirs = @([System.IO.Directory]::GetDirectories([string]$node.Tag) | Sort-Object)
-        foreach ($d in $dirs) {
-            $n = New-Object System.Windows.Forms.TreeNode([System.IO.Path]::GetFileName($d))
-            $n.Tag = $d
-            [void]$n.Nodes.Add('...')
-            [void]$node.Nodes.Add($n)
-        }
-    }
-    catch { [void]$node.Nodes.Add('(cannot read: ' + $_.Exception.Message + ')') }
+# "\\server\share\VIFA\Spacecraft_Lift" under root "\\server\share"  ->  "/VIFA/Spacecraft_Lift"
+function Get-ShareRel($root, $cur) {
+    $root = "$root".TrimEnd('\')
+    $cur = "$cur".TrimEnd('\')
+    if (-not $cur.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+    $rel = $cur.Substring($root.Length).Replace('\', '/')
+    if ($rel -eq '') { return '/' }
+    if (-not $rel.StartsWith('/')) { $rel = '/' + $rel }
+    return $rel
 }
 
-function Set-ShareRoot {
-    $f = $script:shForm
-    $root = $script:shRootBox.Text.Trim().TrimEnd('\')
-    $script:shTree.Nodes.Clear()
-    if ($root -eq '') { return }
-    $n = New-Object System.Windows.Forms.TreeNode($root)
-    $n.Tag = $root
-    [void]$script:shTree.Nodes.Add($n)
-    Add-ShareChildren $n
-    $n.Expand()
-    $script:browseRoot = $root
+# Refreshes the list for the folder we are "in". All state lives in the $script:sh hashtable.
+function Update-ShareList {
+    $st = $script:sh
+    $st.Lb.Items.Clear()
+    if ($st.Cur.Length -gt $st.Root.Length) { [void]$st.Lb.Items.Add('..') }
+    try {
+        foreach ($d in @([System.IO.Directory]::GetDirectories([string]$st.Cur) | Sort-Object)) {
+            [void]$st.Lb.Items.Add([System.IO.Path]::GetFileName($d))
+        }
+    }
+    catch { [void]$st.Lb.Items.Add('(cannot read this folder: ' + $_.Exception.Message + ')') }
+    $rel = Get-ShareRel $st.Root $st.Cur
+    $st.Lbl.Text = "Record path will be:   $rel"
 }
 
 function Show-ShareBrowser {
+    $root = "$($script:browseRoot)".TrimEnd('\')
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = 'Pick the record folder'; $dlg.ClientSize = New-Object System.Drawing.Size(520, 500)
+    $dlg.Text = 'Pick the record folder'; $dlg.ClientSize = New-Object System.Drawing.Size(520, 520)
     $dlg.StartPosition = 'CenterParent'; $dlg.MinimizeBox = $false; $dlg.MaximizeBox = $false; $dlg.FormBorderStyle = 'FixedDialog'
     $l = New-Label 'Share to browse (as this PC sees it):' 12 10 400
     $rootBox = New-Object System.Windows.Forms.TextBox
     $rootBox.Location = New-Object System.Drawing.Point(12, 32); $rootBox.Size = New-Object System.Drawing.Size(410, 22)
-    $rootBox.Text = $script:browseRoot
+    $rootBox.Text = $root
     $goBtn = New-Btn 'Go' 430 29 78
-    $tree = New-Object System.Windows.Forms.TreeView
-    $tree.Location = New-Object System.Drawing.Point(12, 64); $tree.Size = New-Object System.Drawing.Size(496, 360)
-    $sel = New-Label '' 12 430 496
-    $okBtn = New-Btn 'Use this folder' 292 462 130; $okBtn.DialogResult = 'OK'
-    $noBtn = New-Btn 'Cancel' 430 462 78; $noBtn.DialogResult = 'Cancel'
+    $lbl = New-Label '' 12 62 496
+    $lbl.Font = New-Object System.Drawing.Font($lbl.Font, [System.Drawing.FontStyle]::Bold)
+    $lb = New-Object System.Windows.Forms.ListBox
+    $lb.Location = New-Object System.Drawing.Point(12, 88); $lb.Size = New-Object System.Drawing.Size(496, 360)
+    $hint = New-Label 'Double-click a folder to open it, ".." to go back up. Then click "Use this folder" to use the folder you are in.' 12 454 496
+    $hint.Height = 34
+    $okBtn = New-Btn 'Use this folder' 292 486 130; $okBtn.DialogResult = 'OK'
+    $noBtn = New-Btn 'Cancel' 430 486 78; $noBtn.DialogResult = 'Cancel'
     $dlg.AcceptButton = $okBtn; $dlg.CancelButton = $noBtn
-    $dlg.Controls.AddRange(@($l, $rootBox, $goBtn, $tree, $sel, $okBtn, $noBtn))
+    $dlg.Controls.AddRange(@($l, $rootBox, $goBtn, $lbl, $lb, $hint, $okBtn, $noBtn))
 
-    $script:shForm = $dlg; $script:shRootBox = $rootBox; $script:shTree = $tree; $script:shSel = $sel
-    $goBtn.Add_Click({ Set-ShareRoot })
-    $tree.Add_BeforeExpand({
-        param($sender, $e)
-        $n = $e.Node
-        if ($n.Nodes.Count -eq 1 -and $n.Nodes[0].Text -eq '...') { Add-ShareChildren $n }
+    $script:sh = @{ Root = $root; Cur = $root; Lb = $lb; Lbl = $lbl; RootBox = $rootBox }
+
+    $goBtn.Add_Click({
+        $st = $script:sh
+        $r = $st.RootBox.Text.Trim().TrimEnd('\')
+        if ($r -eq '') { return }
+        $st.Root = $r; $st.Cur = $r
+        $script:browseRoot = $r
+        Update-ShareList
     })
-    $tree.Add_AfterSelect({
-        param($sender, $e)
-        $t = "$($e.Node.Tag)"
-        $root = $script:browseRoot
-        if ($t.Length -ge $root.Length -and $t.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $rel = $t.Substring($root.Length).Replace('\', '/')
-            if ($rel -eq '') { $rel = '/' }
-            $script:shSel.Text = "Record path:  $rel"
-            $script:shPick = $rel
-        } else { $script:shSel.Text = ''; $script:shPick = $null }
+    $lb.Add_DoubleClick({
+        $st = $script:sh
+        $item = "$($st.Lb.SelectedItem)"
+        if ($item -eq '' -or $item.StartsWith('(cannot')) { return }
+        if ($item -eq '..') {
+            $i = $st.Cur.LastIndexOf('\')
+            if ($i -gt $st.Root.Length - 1 -and $i -ge 0) { $st.Cur = $st.Cur.Substring(0, $i) }
+            if ($st.Cur.Length -lt $st.Root.Length) { $st.Cur = $st.Root }
+        }
+        else { $st.Cur = $st.Cur + '\' + $item }
+        Update-ShareList
     })
-    Set-ShareRoot
+    Update-ShareList
 
     $answer = $dlg.ShowDialog($form)
-    # read the selection straight from the tree (no dependence on the select event)
-    $node = $tree.SelectedNode
-    $tag = ''; $text = ''
-    if ($node) { $text = "$($node.Text)"; if ($node.Tag) { $tag = "$($node.Tag)" } }
-    $root = "$($script:browseRoot)".TrimEnd('\')
+    $cur = $script:sh.Cur
+    $rootNow = $script:sh.Root
     $dlg.Dispose()
     if ($answer -ne [System.Windows.Forms.DialogResult]::OK) { return }
 
-    $rel = $null
-    if ($tag -ne '' -and $tag.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
-        $rel = $tag.Substring($root.Length).Replace('\', '/')
-        if ($rel -eq '') { $rel = '/' } elseif (-not $rel.StartsWith('/')) { $rel = '/' + $rel }
-    }
+    $rel = Get-ShareRel $rootNow $cur
     if ($rel) {
         $txtPath.Text = $rel
         $chkPath.Checked = $true
-    }
-    else {
-        $nl = [Environment]::NewLine
-        $msg = "Could not work out the path." + $nl + "Selected: '$text'" + $nl + "Folder: '$tag'" + $nl + "Share root: '$root'" + $nl + $nl + "Click the folder name in the tree first (it should highlight), then 'Use this folder'."
-        [void][System.Windows.Forms.MessageBox]::Show($form, $msg, 'Browse share')
     }
 }
 #endregion Share browser
