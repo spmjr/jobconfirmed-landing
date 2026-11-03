@@ -466,13 +466,13 @@ $txtServer.Location = New-Object System.Drawing.Point(298, 82); $txtServer.Size 
 $btnSavePreset = New-Btn 'Save as preset...' 686 79 120
 
 $chkPath = New-Object System.Windows.Forms.CheckBox
-$chkPath.Text = 'SMB record path (default):'
+$chkPath.Text = 'Push record path:'
 $chkPath.Location = New-Object System.Drawing.Point(14, 114); $chkPath.Size = New-Object System.Drawing.Size(158, 22)
 $txtPath = New-Object System.Windows.Forms.TextBox
 $txtPath.Location = New-Object System.Drawing.Point(170, 112); $txtPath.Size = New-Object System.Drawing.Size(508, 22)
 
 $btnBrowsePath = New-Btn 'Browse share...' 686 109 120
-$btnApplyPath = New-Btn 'Set on checked rows' 812 109 160
+$btnApplyPath = New-Btn 'Set path on checked rows' 812 109 170
 
 $btnCheck = New-Btn 'Check units (read only)' 14 150 170
 $btnPush = New-Btn 'Push to checked units' 192 150 170
@@ -622,17 +622,16 @@ function Format-RecPath($t) {
     if ($x.Length -gt 1) { $x = $x.TrimEnd('/') }
     return $x
 }
-# The path a unit will get: its own, else the default box (only while the path checkbox is ticked)
+# The path a unit will get: only the one set on that row (nothing is applied to units you did not pick)
 function Get-RowPath($row) {
     if (-not $chkPath.Checked) { return '' }
-    if ($row.Path -ne '') { return $row.Path }
-    return (Format-RecPath $txtPath.Text)
+    return $row.Path
 }
 function Update-PathColumn {
     foreach ($row in $script:rows) {
         $eff = Get-RowPath $row
         if (-not $chkPath.Checked) { $eff = '-' }
-        elseif ($eff -eq '') { $eff = '(none set)' }
+        elseif ($eff -eq '') { $eff = '(path unchanged)' }
         $row.Item.SubItems[4].Text = $eff
     }
 }
@@ -704,7 +703,7 @@ function Build-Rows {
     }
     $lv.EndUpdate()
     Update-PathColumn
-    $lblStatus.Text = ("{0} HELOs listed. Double-click a row to edit its prefix, or its Record path cell to give that unit its own path." -f $helos.Count)
+    $lblStatus.Text = ("{0} HELOs listed. Check the units you want, then set a record path on them. Double-click a cell to edit a prefix or path by hand." -f $helos.Count)
 }
 
 function Update-Mapping {
@@ -799,17 +798,19 @@ function Invoke-PushUnits {
         $plan.SmbServer = $txtServer.Text.Trim(); $lines += "SMB server address: $($plan.SmbServer)"
     }
     if ($chkPath.Checked -and $chkPath.Enabled) {
-        $noPath = @($targets | Where-Object { (Get-RowPath $_) -eq '' })
-        if ($noPath.Count -gt 0) {
-            [void][System.Windows.Forms.MessageBox]::Show($form, ("No record path for: " + (($noPath | ForEach-Object { Get-DisplayName $_.Dev }) -join ', ') + [Environment]::NewLine + [Environment]::NewLine + "Type a default path, use 'Set on checked rows', or double-click the Record path cell."), 'Push'); return
+        $withPath = @($targets | Where-Object { (Get-RowPath $_) -ne '' })
+        if ($withPath.Count -eq 0) {
+            [void][System.Windows.Forms.MessageBox]::Show($form, "None of the checked units has a record path. Check the units, type or browse a path, click 'Set path on checked rows', or untick 'Push record path'.", 'Push'); return
         }
         $plan.SmbPath = 'per-unit'
-        $groups = $targets | Group-Object { Get-RowPath $_ } | Sort-Object Name
+        $groups = $withPath | Group-Object { Get-RowPath $_ } | Sort-Object Name
         foreach ($g in $groups) {
             $names = ($g.Group | ForEach-Object { Get-DisplayName $_.Dev }) -join ', '
             if ($names.Length -gt 120) { $names = "$($g.Count) units" }
             $lines += "SMB record path $($g.Name)  ->  $names"
         }
+        $skipPath = @($targets | Where-Object { (Get-RowPath $_) -eq '' })
+        if ($skipPath.Count -gt 0) { $lines += "Record path NOT changed on: " + (($skipPath | ForEach-Object { Get-DisplayName $_.Dev }) -join ', ') }
     }
     if ($lines.Count -eq 0) { [void][System.Windows.Forms.MessageBox]::Show($form, 'Nothing selected to push.', 'Push'); return }
 
@@ -831,7 +832,7 @@ function Invoke-PushUnits {
         $lblStatus.Text = ("Pushing {0} of {1}: {2} ({3})" -f $n, $targets.Count, (Get-DisplayName $row.Dev), $row.Dev.IP)
         [System.Windows.Forms.Application]::DoEvents()
         $unitPlan = @{ Prefix = $null; WantPrefix = $plan.WantPrefix; Template = $plan.Template; SmbServer = $plan.SmbServer; SmbPath = $null }
-        if ($plan.SmbPath) { $unitPlan.SmbPath = Get-RowPath $row }
+        if ($plan.SmbPath -and (Get-RowPath $row) -ne '') { $unitPlan.SmbPath = Get-RowPath $row }
         if ($plan.WantPrefix -and $row.Prefix -ne '') { $unitPlan.Prefix = $row.Prefix }
         $res = Invoke-HeloPush $row.Dev.IP $unitPlan
         $counts[$res.Status]++
@@ -883,13 +884,13 @@ $btnBrowsePath.Add_Click({
 $btnApplyPath.Add_Click({
     $pp = Format-RecPath $txtPath.Text
     if ($pp -eq '') { [void][System.Windows.Forms.MessageBox]::Show($form, 'Type or browse a record path first.', 'Record path'); return }
+    if ($lv.CheckedItems.Count -eq 0) { [void][System.Windows.Forms.MessageBox]::Show($form, 'Check the units that should get this path first.', 'Record path'); return }
     $n = 0
     foreach ($it in $lv.CheckedItems) { $it.Tag.Path = $pp; $n++ }
     $chkPath.Checked = $true
     Update-PathColumn
     $lblStatus.Text = "Record path $pp set on $n checked unit(s)."
 })
-$txtPath.Add_TextChanged({ Update-PathColumn })
 $chkPath.Add_CheckedChanged({ Update-PathColumn })
 $lv.Add_DoubleClick({
     $hit = $lv.HitTest($lv.PointToClient([System.Windows.Forms.Control]::MousePosition))
@@ -899,8 +900,7 @@ $lv.Add_DoubleClick({
     elseif ($lv.SelectedItems.Count -gt 0) { $row = $lv.SelectedItems[0].Tag }
     if (-not $row) { return }
     if ($col -eq 4) {
-        $cur = $row.Path; if ($cur -eq '') { $cur = Format-RecPath $txtPath.Text }
-        $new = Show-InputBox 'Record path' ("Record path for $(Get-DisplayName $row.Dev)  (blank = use the default path):") $cur
+        $new = Show-InputBox 'Record path' ("Record path for $(Get-DisplayName $row.Dev)  (blank = leave its path unchanged):") $row.Path
         if ($null -eq $new) { return }
         if ($new -match '[:*?"<>|]') { [void][System.Windows.Forms.MessageBox]::Show($form, 'Those characters are not allowed in a path: : * ? " < > |', 'Record path'); return }
         $row.Path = (Format-RecPath $new)
