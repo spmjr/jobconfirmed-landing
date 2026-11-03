@@ -411,7 +411,7 @@ function New-Btn($text, $x, $y, $w) {
 $lv = New-Object System.Windows.Forms.ListView
 $lv.Dock = 'Fill'; $lv.View = 'Details'; $lv.CheckBoxes = $true
 $lv.FullRowSelect = $true; $lv.GridLines = $true; $lv.HideSelection = $false
-foreach ($col in @(@('Unit', 150), @('IP', 110), @('Schedule', 80), @('Prefix to set', 130), @('State', 90), @('Current prefix', 130), @('Flags / result', 520))) {
+foreach ($col in @(@('Unit', 150), @('IP', 110), @('Schedule', 80), @('Prefix to set', 130), @('Record path', 200), @('State', 90), @('Current prefix', 130), @('Flags / result', 520))) {
     [void]$lv.Columns.Add($col[0], $col[1])
 }
 
@@ -466,12 +466,13 @@ $txtServer.Location = New-Object System.Drawing.Point(298, 82); $txtServer.Size 
 $btnSavePreset = New-Btn 'Save as preset...' 686 79 120
 
 $chkPath = New-Object System.Windows.Forms.CheckBox
-$chkPath.Text = 'SMB record path:'
-$chkPath.Location = New-Object System.Drawing.Point(14, 114); $chkPath.Size = New-Object System.Drawing.Size(150, 22)
+$chkPath.Text = 'SMB record path (default):'
+$chkPath.Location = New-Object System.Drawing.Point(14, 114); $chkPath.Size = New-Object System.Drawing.Size(158, 22)
 $txtPath = New-Object System.Windows.Forms.TextBox
 $txtPath.Location = New-Object System.Drawing.Point(170, 112); $txtPath.Size = New-Object System.Drawing.Size(508, 22)
 
 $btnBrowsePath = New-Btn 'Browse share...' 686 109 120
+$btnApplyPath = New-Btn 'Set on checked rows' 812 109 160
 
 $btnCheck = New-Btn 'Check units (read only)' 14 150 170
 $btnPush = New-Btn 'Push to checked units' 192 150 170
@@ -480,7 +481,7 @@ $btnStop = New-Btn 'Stop' 370 150 80
 $btnStop.Enabled = $false
 $lblHint = New-Label 'Skips units that are recording/streaming or not on the first profile. Domain user/password are never changed.' 462 154 780
 
-$grp.Controls.AddRange(@($chkPrefix, $chkTemplate, $cmbTemplate, $chkServer, $cmbPreset, $txtServer, $btnSavePreset, $chkPath, $txtPath, $btnBrowsePath, $btnCheck, $btnPush, $btnStop, $lblHint))
+$grp.Controls.AddRange(@($chkPrefix, $chkTemplate, $cmbTemplate, $chkServer, $cmbPreset, $txtServer, $btnSavePreset, $chkPath, $txtPath, $btnBrowsePath, $btnApplyPath, $btnCheck, $btnPush, $btnStop, $lblHint))
 
 # Steps whose REST parameter is not known yet stay switched off.
 foreach ($pair in @(@($chkTemplate, 'Template'), @($chkServer, 'SmbServer'), @($chkPath, 'SmbPath'))) {
@@ -608,19 +609,38 @@ function Show-ShareBrowser {
     if ($answer -ne [System.Windows.Forms.DialogResult]::OK) { return }
 
     $rel = Get-ShareRel $rootNow $cur
-    if ($rel) {
-        $txtPath.Text = $rel
-        $chkPath.Checked = $true
-    }
+    return $rel
 }
 #endregion Share browser
 
 #region Rows
+# "VIFG\Spacecraft" or "/VIFG/Spacecraft/" -> "/VIFG/Spacecraft"; blank stays blank
+function Format-RecPath($t) {
+    $x = ("$t").Trim() -replace '\\', '/'
+    if ($x -eq '') { return '' }
+    if (-not $x.StartsWith('/')) { $x = '/' + $x }
+    if ($x.Length -gt 1) { $x = $x.TrimEnd('/') }
+    return $x
+}
+# The path a unit will get: its own, else the default box (only while the path checkbox is ticked)
+function Get-RowPath($row) {
+    if (-not $chkPath.Checked) { return '' }
+    if ($row.Path -ne '') { return $row.Path }
+    return (Format-RecPath $txtPath.Text)
+}
+function Update-PathColumn {
+    foreach ($row in $script:rows) {
+        $eff = Get-RowPath $row
+        if (-not $chkPath.Checked) { $eff = '-' }
+        elseif ($eff -eq '') { $eff = '(none set)' }
+        $row.Item.SubItems[4].Text = $eff
+    }
+}
 function Set-RowResult($row, $status, $text) {
     $flags = $row.Flags
     $line = $text
     if ($flags) { $line = "$text   [$flags]" }
-    $row.Item.SubItems[6].Text = $line
+    $row.Item.SubItems[7].Text = $line
     switch ($status) {
         'OK'      { $row.Item.BackColor = [System.Drawing.Color]::FromArgb(200, 240, 200) }
         'Warn'    { $row.Item.BackColor = [System.Drawing.Color]::FromArgb(255, 225, 150) }
@@ -673,16 +693,18 @@ function Build-Rows {
         [void]$item.SubItems.Add($prefix)
         [void]$item.SubItems.Add('')
         [void]$item.SubItems.Add('')
+        [void]$item.SubItems.Add('')
         [void]$item.SubItems.Add(($flags -join '; '))
         $item.Checked = (-not $locked)
         if ($locked) { $item.ForeColor = [System.Drawing.Color]::Gray }
-        $row = @{ Dev = $dev; Num = $num; Prefix = $prefix; Locked = $locked; Flags = ($flags -join '; '); Item = $item }
+        $row = @{ Dev = $dev; Num = $num; Prefix = $prefix; Path = ''; Locked = $locked; Flags = ($flags -join '; '); Item = $item }
         $item.Tag = $row
         [void]$script:rows.Add($row)
         [void]$lv.Items.Add($item)
     }
     $lv.EndUpdate()
-    $lblStatus.Text = ("{0} HELOs listed. Double-click a row to edit its prefix by hand." -f $helos.Count)
+    Update-PathColumn
+    $lblStatus.Text = ("{0} HELOs listed. Double-click a row to edit its prefix, or its Record path cell to give that unit its own path." -f $helos.Count)
 }
 
 function Update-Mapping {
@@ -747,8 +769,8 @@ function Invoke-CheckUnits {
         $lblStatus.Text = ("Checking {0} of {1}: {2}" -f $n, $targets.Count, $row.Dev.IP)
         [System.Windows.Forms.Application]::DoEvents()
         $snap = Get-HeloSnapshot $row.Dev.IP
-        $row.Item.SubItems[4].Text = $snap.State
-        $row.Item.SubItems[5].Text = $snap.Prefix
+        $row.Item.SubItems[5].Text = $snap.State
+        $row.Item.SubItems[6].Text = $snap.Prefix
         $text = 'checked'
         $status = 'OK'
         if (-not $snap.Ok) { $text = 'no answer'; $status = 'NoConn' }
@@ -777,9 +799,17 @@ function Invoke-PushUnits {
         $plan.SmbServer = $txtServer.Text.Trim(); $lines += "SMB server address: $($plan.SmbServer)"
     }
     if ($chkPath.Checked -and $chkPath.Enabled) {
-        if ($txtPath.Text.Trim() -eq '') { [void][System.Windows.Forms.MessageBox]::Show($form, 'Enter the SMB record path.', 'Push'); return }
-        $pp = ($txtPath.Text.Trim() -replace '\\', '/'); if (-not $pp.StartsWith('/')) { $pp = '/' + $pp }
-        $plan.SmbPath = $pp; $lines += "SMB record path: $($plan.SmbPath)"
+        $noPath = @($targets | Where-Object { (Get-RowPath $_) -eq '' })
+        if ($noPath.Count -gt 0) {
+            [void][System.Windows.Forms.MessageBox]::Show($form, ("No record path for: " + (($noPath | ForEach-Object { Get-DisplayName $_.Dev }) -join ', ') + [Environment]::NewLine + [Environment]::NewLine + "Type a default path, use 'Set on checked rows', or double-click the Record path cell."), 'Push'); return
+        }
+        $plan.SmbPath = 'per-unit'
+        $groups = $targets | Group-Object { Get-RowPath $_ } | Sort-Object Name
+        foreach ($g in $groups) {
+            $names = ($g.Group | ForEach-Object { Get-DisplayName $_.Dev }) -join ', '
+            if ($names.Length -gt 120) { $names = "$($g.Count) units" }
+            $lines += "SMB record path $($g.Name)  ->  $names"
+        }
     }
     if ($lines.Count -eq 0) { [void][System.Windows.Forms.MessageBox]::Show($form, 'Nothing selected to push.', 'Push'); return }
 
@@ -800,7 +830,8 @@ function Invoke-PushUnits {
         $n++
         $lblStatus.Text = ("Pushing {0} of {1}: {2} ({3})" -f $n, $targets.Count, (Get-DisplayName $row.Dev), $row.Dev.IP)
         [System.Windows.Forms.Application]::DoEvents()
-        $unitPlan = @{ Prefix = $null; WantPrefix = $plan.WantPrefix; Template = $plan.Template; SmbServer = $plan.SmbServer; SmbPath = $plan.SmbPath }
+        $unitPlan = @{ Prefix = $null; WantPrefix = $plan.WantPrefix; Template = $plan.Template; SmbServer = $plan.SmbServer; SmbPath = $null }
+        if ($plan.SmbPath) { $unitPlan.SmbPath = Get-RowPath $row }
         if ($plan.WantPrefix -and $row.Prefix -ne '') { $unitPlan.Prefix = $row.Prefix }
         $res = Invoke-HeloPush $row.Dev.IP $unitPlan
         $counts[$res.Status]++
@@ -846,18 +877,44 @@ $btnSavePreset.Add_Click({
     Update-PresetList
 })
 $btnBrowsePath.Add_Click({
-    [void](Show-ShareBrowser)
+    $r = Show-ShareBrowser
+    if ($r) { $txtPath.Text = $r; $chkPath.Checked = $true }
 })
+$btnApplyPath.Add_Click({
+    $pp = Format-RecPath $txtPath.Text
+    if ($pp -eq '') { [void][System.Windows.Forms.MessageBox]::Show($form, 'Type or browse a record path first.', 'Record path'); return }
+    $n = 0
+    foreach ($it in $lv.CheckedItems) { $it.Tag.Path = $pp; $n++ }
+    $chkPath.Checked = $true
+    Update-PathColumn
+    $lblStatus.Text = "Record path $pp set on $n checked unit(s)."
+})
+$txtPath.Add_TextChanged({ Update-PathColumn })
+$chkPath.Add_CheckedChanged({ Update-PathColumn })
 $lv.Add_DoubleClick({
-    if ($lv.SelectedItems.Count -eq 0) { return }
-    $row = $lv.SelectedItems[0].Tag
+    $hit = $lv.HitTest($lv.PointToClient([System.Windows.Forms.Control]::MousePosition))
+    $col = -1
+    $row = $null
+    if ($hit.Item) { $row = $hit.Item.Tag; if ($hit.SubItem) { $col = $hit.Item.SubItems.IndexOf($hit.SubItem) } }
+    elseif ($lv.SelectedItems.Count -gt 0) { $row = $lv.SelectedItems[0].Tag }
+    if (-not $row) { return }
+    if ($col -eq 4) {
+        $cur = $row.Path; if ($cur -eq '') { $cur = Format-RecPath $txtPath.Text }
+        $new = Show-InputBox 'Record path' ("Record path for $(Get-DisplayName $row.Dev)  (blank = use the default path):") $cur
+        if ($null -eq $new) { return }
+        if ($new -match '[:*?"<>|]') { [void][System.Windows.Forms.MessageBox]::Show($form, 'Those characters are not allowed in a path: : * ? " < > |', 'Record path'); return }
+        $row.Path = (Format-RecPath $new)
+        $row.Item.Checked = $true
+        Update-PathColumn
+        return
+    }
     $new = Show-InputBox 'Filename prefix' ("Prefix for $(Get-DisplayName $row.Dev)  (blank = leave unchanged):") $row.Prefix
     if ($null -eq $new) { return }
     if ($new -match '[\\/:*?"<>|]') { [void][System.Windows.Forms.MessageBox]::Show($form, 'Those characters are not allowed in a file name: \ / : * ? " < > |', 'Prefix'); return }
     $row.Prefix = $new
     $row.Item.SubItems[3].Text = $new
     if ($row.Flags -notmatch 'edited by hand') { $row.Flags = ($row.Flags + $(if ($row.Flags) { '; ' } else { '' }) + 'prefix edited by hand') }
-    $row.Item.SubItems[6].Text = $row.Flags
+    $row.Item.SubItems[7].Text = $row.Flags
     $row.Item.Checked = $true
 })
 $btnAll.Add_Click({ foreach ($it in $lv.Items) { $it.Checked = $true } })
