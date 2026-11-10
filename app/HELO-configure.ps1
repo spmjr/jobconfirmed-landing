@@ -528,7 +528,38 @@ function Show-InputBox($title, $prompt, $default = '') {
 
 #region Share browser
 # Where the PC sees the recording share (the HELOs reach the same share by their own address).
-$script:browseRoot = '\\147.105.86.222\Vulcan'
+$script:browseRoot = '\\192.168.185.100\Vulcan'
+
+# Windows only shows the subfolders of a network share once this PC is logged in to it.
+if (-not ('NetShare' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class NetShare {
+    [StructLayout(LayoutKind.Sequential)]
+    public class NETRESOURCE {
+        public int dwScope = 0; public int dwType = 1; public int dwDisplayType = 0; public int dwUsage = 0;
+        public string lpLocalName = null; public string lpRemoteName; public string lpComment = null; public string lpProvider = null;
+    }
+    [DllImport("mpr.dll", CharSet = CharSet.Unicode)]
+    static extern int WNetAddConnection2(NETRESOURCE r, string password, string user, int flags);
+    [DllImport("mpr.dll", CharSet = CharSet.Unicode)]
+    static extern int WNetCancelConnection2(string name, int flags, bool force);
+    public static int Connect(string remote, string user, string password) {
+        NETRESOURCE r = new NETRESOURCE();
+        r.lpRemoteName = remote;
+        WNetCancelConnection2(remote, 0, false);
+        return WNetAddConnection2(r, password, user, 0);
+    }
+}
+'@
+}
+
+# "\\server\share\sub\folder" -> "\\server\share"
+function Get-ShareBase($path) {
+    if ("$path" -match '^(\\\\[^\\]+\\[^\\]+)') { return $Matches[1] }
+    return "$path"
+}
 $script:shResult = $null
 
 # "\\server\share\VIFA\Spacecraft_Lift" under root "\\server\share"  ->  "/VIFA/Spacecraft_Lift"
@@ -546,15 +577,34 @@ function Get-ShareRel($root, $cur) {
 function Update-ShareList {
     $st = $script:sh
     $st.Lb.Items.Clear()
+    $st.Need = $false
     if ($st.Cur.Length -gt $st.Root.Length) { [void]$st.Lb.Items.Add('..') }
+    $found = 0
     try {
         foreach ($d in @([System.IO.Directory]::GetDirectories([string]$st.Cur) | Sort-Object)) {
-            [void]$st.Lb.Items.Add([System.IO.Path]::GetFileName($d))
+            [void]$st.Lb.Items.Add([System.IO.Path]::GetFileName($d)); $found++
         }
+        if ($found -eq 0 -and $st.Cur -eq $st.Root) { $st.Need = $true; [void]$st.Lb.Items.Add('(no folders shown - click "Log in...")') }
     }
-    catch { [void]$st.Lb.Items.Add('(cannot read this folder: ' + $_.Exception.Message + ')') }
+    catch { $st.Need = $true; [void]$st.Lb.Items.Add('(cannot read this folder: ' + $_.Exception.Message + ')') }
     $rel = Get-ShareRel $st.Root $st.Cur
     $st.Lbl.Text = "Record path will be:   $rel"
+}
+
+function Invoke-ShareLogin {
+    $st = $script:sh
+    $base = Get-ShareBase $st.Root
+    $cred = $null
+    try { $cred = $host.UI.PromptForCredential('Log in to the share', "Sign in to $base to see its folders.", '', $base) } catch { }
+    if (-not $cred) { return }
+    $pw = $cred.GetNetworkCredential().Password
+    $rc = [NetShare]::Connect($base, $cred.UserName, $pw)
+    $pw = $null
+    if ($rc -ne 0) {
+        $why = (New-Object System.ComponentModel.Win32Exception([int]$rc)).Message
+        [void][System.Windows.Forms.MessageBox]::Show($form, "Could not log in to $base" + [Environment]::NewLine + "Error ${rc}: $why", 'Log in')
+    }
+    Update-ShareList
 }
 
 function Show-ShareBrowser {
@@ -573,13 +623,16 @@ function Show-ShareBrowser {
     $lb.Location = New-Object System.Drawing.Point(12, 88); $lb.Size = New-Object System.Drawing.Size(496, 360)
     $hint = New-Label 'Double-click a folder to open it, ".." to go back up. Then click "Use this folder" to use the folder you are in.' 12 454 496
     $hint.Height = 34
+    $loginBtn = New-Btn 'Log in...' 12 486 100
     $okBtn = New-Btn 'Use this folder' 292 486 130; $okBtn.DialogResult = 'OK'
     $noBtn = New-Btn 'Cancel' 430 486 78; $noBtn.DialogResult = 'Cancel'
     $dlg.AcceptButton = $okBtn; $dlg.CancelButton = $noBtn
-    $dlg.Controls.AddRange(@($l, $rootBox, $goBtn, $lbl, $lb, $hint, $okBtn, $noBtn))
+    $dlg.Controls.AddRange(@($l, $rootBox, $goBtn, $lbl, $lb, $hint, $loginBtn, $okBtn, $noBtn))
 
-    $script:sh = @{ Root = $root; Cur = $root; Lb = $lb; Lbl = $lbl; RootBox = $rootBox }
+    $script:sh = @{ Root = $root; Cur = $root; Lb = $lb; Lbl = $lbl; RootBox = $rootBox; Need = $false }
 
+    $loginBtn.Add_Click({ Invoke-ShareLogin })
+    $dlg.Add_Shown({ if ($script:sh.Need) { Invoke-ShareLogin } })
     $goBtn.Add_Click({
         $st = $script:sh
         $r = $st.RootBox.Text.Trim().TrimEnd('\')
