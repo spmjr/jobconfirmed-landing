@@ -37,6 +37,7 @@ $presetPath = Join-Path $baseDir 'HELO-presets.txt'
 $params = @{
     RecState      = 'eParamID_ReplicatorPrimaryRecState'
     StrState      = 'eParamID_ReplicatorStreamState'
+    Command       = 'eParamID_ReplicatorCommand'   # 1 = start recording, 2 = stop recording (AJA HELO Commands chapter)
     ProfileSel    = 'eParamID_RecordingProfileSel'
     Prefix        = 'eParamID_FilenamePrefix'
     SmbServer     = 'eParamID_RecordingShareNetworkSMB'
@@ -439,7 +440,7 @@ $pnlTop.Controls.AddRange(@($lblSched, $txtSched, $btnBrowse, $lblSheet, $cmbShe
 
 # --- bottom: what to push ---
 $grp = New-Object System.Windows.Forms.GroupBox
-$grp.Dock = 'Bottom'; $grp.Height = 196
+$grp.Dock = 'Bottom'; $grp.Height = 236
 $grp.Text = 'Settings to push to the CHECKED units (always the first recording profile)'
 
 $chkPrefix = New-Object System.Windows.Forms.CheckBox
@@ -479,9 +480,14 @@ $btnPush = New-Btn 'Push to checked units' 192 150 170
 $btnPush.Font = New-Object System.Drawing.Font($btnPush.Font, [System.Drawing.FontStyle]::Bold)
 $btnStop = New-Btn 'Stop' 370 150 80
 $btnStop.Enabled = $false
+$btnRecStart = New-Btn 'START recording on checked units' 14 192 230
+$btnRecStart.BackColor = [System.Drawing.Color]::FromArgb(200, 240, 200)
+$btnRecStop = New-Btn 'STOP recording on checked units' 252 192 230
+$btnRecStop.BackColor = [System.Drawing.Color]::FromArgb(255, 190, 190)
+$lblRecHint = New-Label 'Sends the record start/stop command only. Asks to confirm first. Start skips units already recording; stop skips units not recording.' 494 197 780
 $lblHint = New-Label 'Skips units that are recording/streaming or not on the first profile. Domain user/password are never changed.' 462 154 780
 
-$grp.Controls.AddRange(@($chkPrefix, $chkTemplate, $cmbTemplate, $chkServer, $cmbPreset, $txtServer, $btnSavePreset, $chkPath, $txtPath, $btnBrowsePath, $btnApplyPath, $btnCheck, $btnPush, $btnStop, $lblHint))
+$grp.Controls.AddRange(@($chkPrefix, $chkTemplate, $cmbTemplate, $chkServer, $cmbPreset, $txtServer, $btnSavePreset, $chkPath, $txtPath, $btnBrowsePath, $btnApplyPath, $btnCheck, $btnPush, $btnStop, $lblHint, $btnRecStart, $btnRecStop, $lblRecHint))
 
 # Steps whose REST parameter is not known yet stay switched off.
 foreach ($pair in @(@($chkTemplate, 'Template'), @($chkServer, 'SmbServer'), @($chkPath, 'SmbPath'))) {
@@ -805,7 +811,7 @@ function Import-ScheduleFile($path) {
 #region Running
 function Set-Busy($on) {
     $script:busy = $on
-    $btnCheck.Enabled = -not $on; $btnPush.Enabled = -not $on; $btnBrowse.Enabled = -not $on
+    $btnCheck.Enabled = -not $on; $btnPush.Enabled = -not $on; $btnRecStart.Enabled = -not $on; $btnRecStop.Enabled = -not $on; $btnBrowse.Enabled = -not $on
     $btnStop.Enabled = $on
     if ($on) { $script:stop = $false }
 }
@@ -898,6 +904,80 @@ function Invoke-PushUnits {
     Set-Busy $false
     [void][System.Windows.Forms.MessageBox]::Show($form, $summary + "`r`n`r`nDetails are in the Flags / result column.", 'Push finished')
 }
+# Starts or stops RECORDING (not streaming) on the checked units, with a confirmation first.
+function Invoke-RecControl($action) {
+    $start = ($action -eq 'start')
+    $verb = 'STOP'; if ($start) { $verb = 'START' }
+    $targets = @($lv.CheckedItems | ForEach-Object { $_.Tag })
+    if ($targets.Count -eq 0) { [void][System.Windows.Forms.MessageBox]::Show($form, 'No units are checked.', "$verb recording"); return }
+    $names = ($targets | ForEach-Object { Get-DisplayName $_.Dev }) -join ', '
+    if ($names.Length -gt 400) { $names = $names.Substring(0, 400) + ' ...' }
+    $nl = [Environment]::NewLine
+    $msg = "$verb RECORDING on $($targets.Count) unit(s)?" + $nl + $nl + $names
+    if (-not $start) { $msg += $nl + $nl + 'This ends the recording in progress on those units.' }
+    $lockedPicked = @($targets | Where-Object { $_.Locked })
+    if ($lockedPicked.Count -gt 0) {
+        $msg += $nl + $nl + "WARNING: $($lockedPicked.Count) checked unit(s) are marked DON'T CHANGE in the schedule: " + (($lockedPicked | ForEach-Object { Get-DisplayName $_.Dev }) -join ', ')
+    }
+    $icon = 'Question'; if (-not $start -or $lockedPicked.Count -gt 0) { $icon = 'Warning' }
+    if ([System.Windows.Forms.MessageBox]::Show($form, $msg, "$verb recording", 'YesNo', $icon, 'Button2') -ne 'Yes') { return }
+
+    Set-Busy $true
+    $counts = @{ OK = 0; Warn = 0; Skipped = 0; NoConn = 0; Failed = 0 }
+    $n = 0
+    foreach ($row in $targets) {
+        if ($script:stop) { break }
+        $n++
+        $ip = $row.Dev.IP
+        $lblStatus.Text = ("{0} {1} of {2}: {3} ({4})" -f $verb, $n, $targets.Count, (Get-DisplayName $row.Dev), $ip)
+        [System.Windows.Forms.Application]::DoEvents()
+        $status = 'OK'; $text = ''
+        $r0 = Invoke-HeloGet $ip $params.RecState
+        if (-not $r0.Ok) { $status = 'NoConn'; $text = 'no answer' }
+        else {
+            $isRec = ($r0.Raw -match 'Recording')
+            $failRec = ($r0.Raw -match 'FailingInRecord')
+            if ($start -and ($isRec -or $failRec)) { $status = 'Skipped'; $text = 'already recording' }
+            elseif ((-not $start) -and (-not $isRec) -and (-not $failRec)) { $status = 'Skipped'; $text = 'not recording' }
+            else {
+                $cmd = '2'; if ($start) { $cmd = '1' }
+                $set = Invoke-HeloSet $ip $params.Command $cmd
+                if (-not $set.Ok) { $status = 'Failed'; $text = "command failed ($($set.Error))" }
+                else {
+                    $state = ''
+                    for ($t = 0; $t -lt 10; $t++) {
+                        Start-Sleep -Milliseconds 700
+                        [System.Windows.Forms.Application]::DoEvents()
+                        $r1 = Invoke-HeloGet $ip $params.RecState
+                        if (-not $r1.Ok) { continue }
+                        if ($start) {
+                            if ($r1.Raw -match 'Recording') { $state = 'rec'; break }
+                            if ($r1.Raw -match 'FailingInRecord') { $state = 'fail'; break }
+                        }
+                        else { if ($r1.Raw -match 'Idle') { $state = 'idle'; break } }
+                    }
+                    if ($start) {
+                        if ($state -eq 'rec') { $text = 'recording started'; $row.Item.SubItems[5].Text = 'RECORDING' }
+                        elseif ($state -eq 'fail') { $status = 'Warn'; $text = 'started but failing - check the share / record path'; $row.Item.SubItems[5].Text = 'FAILING' }
+                        else { $status = 'Warn'; $text = 'command sent, but it is not recording yet' }
+                    }
+                    else {
+                        if ($state -eq 'idle') { $text = 'recording stopped'; $row.Item.SubItems[5].Text = 'Idle' }
+                        else { $status = 'Warn'; $text = 'command sent, but it still shows recording' }
+                    }
+                }
+            }
+        }
+        $counts[$status]++
+        Set-RowResult $row $status $text
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    $summary = "{0} done. OK: {1}   check: {2}   skipped: {3}   no answer: {4}   failed: {5}" -f $verb, $counts.OK, $counts.Warn, $counts.Skipped, $counts.NoConn, $counts.Failed
+    if ($script:stop) { $summary = "Stopped. " + $summary }
+    $lblStatus.Text = $summary
+    Set-Busy $false
+    [void][System.Windows.Forms.MessageBox]::Show($form, $summary + $nl + $nl + 'Details are in the Flags / result column.', "$verb recording")
+}
 #endregion Running
 
 #region Events
@@ -975,6 +1055,8 @@ $btnNone.Add_Click({ foreach ($it in $lv.Items) { $it.Checked = $false } })
 $btnSafe.Add_Click({ foreach ($it in $lv.Items) { $it.Checked = (-not $it.Tag.Locked) } })
 $btnCheck.Add_Click({ Invoke-CheckUnits })
 $btnPush.Add_Click({ Invoke-PushUnits })
+$btnRecStart.Add_Click({ Invoke-RecControl 'start' })
+$btnRecStop.Add_Click({ Invoke-RecControl 'stop' })
 $btnStop.Add_Click({ $script:stop = $true; $lblStatus.Text = 'Stopping after the current unit...' })
 $form.Add_Shown({
     if ($cfg.Warnings.Count -gt 0) { [void][System.Windows.Forms.MessageBox]::Show($form, ($cfg.Warnings -join "`r`n"), 'HELO list', 'OK', 'Warning') }
