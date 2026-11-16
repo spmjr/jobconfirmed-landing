@@ -403,7 +403,7 @@ def action_set_data_lan_and_download_stringouts(dvrList):
     return dvrList
 
 
-def action_stringout(dvrList, clipSessionId, startTh, duration, downloadDir):
+def action_stringout(dvrList, clipSessionId, startTh, duration):
     clipSessionId = clipSessionId.replace("+", "%2b")
 
     setting = "config"
@@ -453,8 +453,10 @@ def action_stringout(dvrList, clipSessionId, startTh, duration, downloadDir):
         jobWatchDog += 1
 
     for dvr in dvrList:
+        # Remember what was made; the download folder is asked for each time
+        # on 'Download Stringouts', so it isn't fixed here.
         stringoutName = dvr.clipName + ".mov"
-        dvr.downloadStrings.append(f"http://{dvr.ip}/media/{stringoutName},{downloadDir}\\{stringoutName}")
+        dvr.pendingStringouts = [(f"http://{dvr.ip}/media/{stringoutName}", stringoutName)]
     print("\033[93m[INFO]\033[0m Stringout creation complete. Ready to download via 'Download Stringouts'.")
     return dvrList
 
@@ -964,20 +966,14 @@ class StringoutDialog(tk.Toplevel):
                            f"Targets: {names}\n\nProceed?"):
             return
 
-        workDir = os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "stringouts")
-        os.makedirs(workDir, exist_ok=True)
-        downloadDir = filedialog.askdirectory(initialdir=workDir, title="Select stringouts download directory")
-        if not downloadDir:
-            return
-
         run_job(self.app, "Make Stringouts", action_stringout, targets,
-                clip, start_tc, dur_tc, downloadDir, on_done=lambda r: None)
+                clip, start_tc, dur_tc, on_done=lambda r: None)
         self.destroy()
 
 
 class ArchiveDialog(tk.Toplevel):
-    SESSION_RANGE = [str(i) for i in range(1, 51)]   # 1-50
-    TAKE_RANGE = [""] + [str(i) for i in range(1, 51)]  # "" = whole session, no +take suffix
+    SESSION_RANGE = [str(i) for i in range(0, 51)]   # 0-50
+    TAKE_RANGE = [""] + [str(i) for i in range(0, 51)]  # "" = whole session, no +take suffix; 0-50 = a specific take
 
     def __init__(self, app, targets):
         super().__init__(app)
@@ -1292,7 +1288,27 @@ class App(tk.Tk):
             messagebox.showwarning("No DVRs selected",
                 "Select at least one DVR in the status table (or click 'Select All DVRs') first.")
             return
-        run_job(self, "Download Stringouts", action_set_data_lan_and_download_stringouts, targets,
+        ready = [d for d in targets if getattr(d, "pendingStringouts", None)]
+        missing = [d.dvrName for d in targets if d not in ready]
+        if not ready:
+            messagebox.showwarning("Nothing to download",
+                "No stringouts have been made on the selected DVRs since this app was opened.\n"
+                "Use Make Stringouts first.")
+            return
+        if missing:
+            if not messagebox.askyesno("Some DVRs have no stringout",
+                    "These selected DVRs have no stringout and will be skipped:\n"
+                    + ", ".join(missing) + "\n\nContinue with the others?"):
+                return
+        workDir = os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "stringouts")
+        os.makedirs(workDir, exist_ok=True)
+        downloadDir = filedialog.askdirectory(initialdir=workDir,
+                                               title="Select stringouts download directory")
+        if not downloadDir:
+            return
+        for d in ready:
+            d.downloadStrings = [f"{url},{downloadDir}\\{name}" for url, name in d.pendingStringouts]
+        run_job(self, "Download Stringouts", action_set_data_lan_and_download_stringouts, ready,
                 on_done=lambda r: self.refresh_table())
 
     def open_archive(self):
